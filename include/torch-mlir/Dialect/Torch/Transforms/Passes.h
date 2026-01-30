@@ -148,6 +148,9 @@ std::unique_ptr<OperationPass<ModuleOp>> createLowerToBackendContractPass(
     ArrayRef<std::string> backendLegalOps, StringRef extraLibrary);
 
 std::unique_ptr<OperationPass<ModuleOp>>
+createLowerInceptronOpsPass();
+
+std::unique_ptr<OperationPass<ModuleOp>>
 createVerifyBackendContractNoDecompositionsPass();
 
 StringRef getAbstractInterpLibrary();

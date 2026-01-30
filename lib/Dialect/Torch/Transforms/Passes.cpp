@@ -73,6 +73,9 @@ void mlir::torch::Torch::createTorchDynamoExportToTorchBackendPipeline(
   // Inline func.call operations created by higher-order ops like while_loop
   // to conform to the linalg-on-tensors backend contract.
   pm.addPass(createInlinerPass());
+  // Lower custom scaled mm operator to an external call before backend
+  // contract conversion so later passes only see a standard func.call.
+  pm.addPass(createLowerInceptronOpsPass());
   pm.addNestedPass<func::FuncOp>(
       createReduceOpVariantsPass(options.extraLibrary));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
