@@ -70,6 +70,9 @@ void mlir::torch::Torch::createTorchScriptModuleToTorchBackendPipeline(
 
 void mlir::torch::Torch::createTorchDynamoExportToTorchBackendPipeline(
     OpPassManager &pm, const TorchLoweringPipelineOptions &options) {
+  // Lower custom scaled mm operator to an external call before backend
+  // contract conversion so later passes only see a standard func.call.
+  pm.addPass(createLowerInceptronOpsPass());
   pm.addNestedPass<func::FuncOp>(
       createReduceOpVariantsPass(options.extraLibrary));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());

@@ -162,6 +162,17 @@ def ReduceOpVariants : Pass<"torch-reduce-op-variants", "func::FuncOp"> {
   }];
 }
 
+def LowerInceptronOps : Pass<"torch-lower-inceptron-ops", "ModuleOp"> {
+  let summary = "Lower Inceptron custom torch.operators to func.call";
+  let constructor = "mlir::torch::Torch::createLowerInceptronOpsPass()";
+  let description = [{
+    Matches torch.operator \"netcrush_ext.netcrush_scaled_mm\" and replaces it
+    with a call to an external function @netcrush_scaled_mm, inserting the
+    declaration on-demand. This is useful when delegating the operation to an
+    out-of-tree runtime without further decomposition in Torch dialect.
+  }];
+}
+
 def MaximizeValueSemantics : Pass<"torch-maximize-value-semantics", "func::FuncOp"> {
   let summary = "Use value-semantic tensors where possible.";
   let description = [{
