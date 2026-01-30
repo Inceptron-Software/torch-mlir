@@ -69,6 +69,8 @@ class VerifyLinalgOnTensorsBackendContractPass
     target.addDynamicallyLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>(
         opHasLegalTypes);
 
+    target.addDynamicallyLegalOp<func::CallOp>(opHasLegalTypes);
+
     target.addDynamicallyLegalOp<GetNextSeedOp>(opHasLegalTypes);
 
     // Basic scalar operations.

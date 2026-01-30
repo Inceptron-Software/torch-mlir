@@ -8,6 +8,7 @@ add_mlir_library(TorchMLIRTorchPasses
   GlobalizeObjectGraph.cpp
   InlineGlobalSlots.cpp
   LowerToBackendContract.cpp
+  LowerInceptronOps.cpp
   MatchQuantizedOps.cpp
   MaximizeValueSemantics.cpp
   PrepareForGlobalizeObjectGraph.cpp
