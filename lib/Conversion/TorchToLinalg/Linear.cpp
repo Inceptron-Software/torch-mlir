@@ -289,7 +289,10 @@ public:
 
     Type newResultType = getTypeConverter()->convertType(op.getType());
     auto resultType = cast<RankedTensorType>(newResultType);
-    Type elementType = resultType.getElementType();
+    Type resultElementType = resultType.getElementType();
+    auto accumulatorDType =
+        getDefaultAccType(rewriter, lhsType.getElementType());
+    Type elementType = accumulatorDType;
 
     if (lhsZeroPoint) {
       // get each zero point ready to pass to a quantized_matmul
@@ -384,6 +387,10 @@ public:
               .create<linalg::DotOp>(loc, zeroTensor.getType(),
                                      ValueRange{lhs, rhs}, zeroTensor)
               .getResult(0);
+      if (accumulatorDType != resultElementType) {
+        dotProd = torch_to_linalg::convertTensorToElementType(
+            rewriter, loc, dotProd, resultElementType);
+      }
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, dotProd);
       return success();
     }
@@ -402,6 +409,10 @@ public:
               .create<linalg::VecmatOp>(loc, zeroTensor.getType(),
                                         ValueRange{lhs, rhs}, zeroTensor)
               .getResult(0);
+      if (accumulatorDType != resultElementType) {
+        matmul = torch_to_linalg::convertTensorToElementType(
+            rewriter, loc, matmul, resultElementType);
+      }
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, matmul);
       return success();
     }
@@ -420,6 +431,10 @@ public:
               .create<linalg::MatvecOp>(loc, zeroTensor.getType(),
                                         ValueRange{lhs, rhs}, zeroTensor)
               .getResult(0);
+      if (accumulatorDType != resultElementType) {
+        matmul = torch_to_linalg::convertTensorToElementType(
+            rewriter, loc, matmul, resultElementType);
+      }
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, matmul);
       return success();
     }
@@ -447,6 +462,10 @@ public:
                      .create<linalg::MatmulOp>(loc, zeroTensor.getType(),
                                                ValueRange{lhs, rhs}, zeroTensor)
                      .getResult(0);
+      }
+      if (accumulatorDType != resultElementType) {
+        matmul = torch_to_linalg::convertTensorToElementType(
+            rewriter, loc, matmul, resultElementType);
       }
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, matmul);
       return success();
@@ -554,6 +573,10 @@ public:
                          loc, zeroTensor.getType(),
                          ValueRange{broadcastedLhs, broadcastedRhs}, zeroTensor)
                      .getResult(0);
+        if (accumulatorDType != resultElementType) {
+          matmul = torch_to_linalg::convertTensorToElementType(
+              rewriter, loc, matmul, resultElementType);
+        }
         rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, matmul);
         return success();
       }
@@ -620,6 +643,10 @@ public:
                       ValueRange{collapsedLhs, collapsedRhs}, zeroTensor)
                   .getResult(0);
         }
+        if (accumulatorDType != resultElementType) {
+          batchMatMul = torch_to_linalg::convertTensorToElementType(
+              rewriter, loc, batchMatMul, resultElementType);
+        }
         Value expandResult = rewriter.create<tensor::ExpandShapeOp>(
             loc, resultType, batchMatMul, reassociation);
         rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType,
@@ -664,12 +691,20 @@ public:
                   /*iteratorTypes=*/iteratorTypes,
                   [&](OpBuilder &b, Location loc, ValueRange args) {
                     Value l = args[0], r = args[1], res = args[2];
+                    if (accumulatorDType != lhsType.getElementType()) {
+                      l = b.create<arith::ExtFOp>(loc, accumulatorDType, l);
+                      r = b.create<arith::ExtFOp>(loc, accumulatorDType, r);
+                    }
                     Value mul = b.create<arith::MulFOp>(loc, l, r);
                     Value add = b.create<arith::AddFOp>(loc, mul, res);
                     b.create<linalg::YieldOp>(loc, add);
                   })
               .getResult(0);
 
+      if (accumulatorDType != resultElementType) {
+        finalRes = torch_to_linalg::convertTensorToElementType(
+            rewriter, loc, finalRes, resultElementType);
+      }
       rewriter.replaceOpWithNewOp<tensor::CastOp>(op, newResultType, finalRes);
       return success();
     }
