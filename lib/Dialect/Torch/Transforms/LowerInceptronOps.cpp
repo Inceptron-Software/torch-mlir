@@ -50,6 +50,7 @@ namespace {
 
 constexpr StringLiteral kTargetOpName("inceptron.inceptron_scaled_mm");
 constexpr StringLiteral kCalleeName("inceptron_scaled_mm");
+constexpr StringLiteral kAtenScaledMmOpName("aten._scaled_mm");
 
 /// Rewrites Inceptron custom torch.operators into a direct func.call to an
 /// external function declaration. The declaration is created on-demand in the
@@ -60,19 +61,53 @@ public:
 
   LogicalResult matchAndRewrite(OperatorOp op,
                                 PatternRewriter &rewriter) const override {
-    if (op.getName().ltrim("torch.") != kTargetOpName)
+    StringRef name = op.getName().ltrim("torch.");
+    if (name != kTargetOpName && name != kAtenScaledMmOpName)
       return failure();
 
-    // Check that the bias operand is torch.constant.none.
-    // TODO: Support non-none bias.
-    Value biasOperand = op.getOperand(5);
-    auto constNoneOp = biasOperand.getDefiningOp<ConstantNoneOp>();
-    if (!constNoneOp) {
-      return rewriter.notifyMatchFailure(op, "only supports bias=None for now");
-    }
+    SmallVector<Type> opdTypes;
+    SmallVector<Value> opds;
 
-    auto opdTypes = TypeRange(op.getOperandTypes()).drop_back();
-    auto opds = op.getOperands().drop_back();
+    if (name == kTargetOpName) {
+      Value biasOperand = op.getOperand(5);
+      auto constNoneOp = biasOperand.getDefiningOp<ConstantNoneOp>();
+      if (!constNoneOp) {
+        return rewriter.notifyMatchFailure(op,
+                                           "only supports bias=None for now");
+      }
+      opdTypes.append(op.getOperandTypes().begin(),
+                      op.getOperandTypes().begin() + 5);
+      opds.append(op.getOperands().begin(), op.getOperands().begin() + 5);
+    } else {
+      if (!op.getOperand(4).getDefiningOp<ConstantNoneOp>()) {
+        return rewriter.notifyMatchFailure(op,
+                                           "only supports bias=None for now");
+      }
+      if (!op.getOperand(5).getDefiningOp<ConstantNoneOp>()) {
+        return rewriter.notifyMatchFailure(
+            op, "only supports scale_result=None for now");
+      }
+      auto useFastAccum = op.getOperand(7).getDefiningOp<ConstantBoolOp>();
+      if (!useFastAccum || useFastAccum.getValue()) {
+        return rewriter.notifyMatchFailure(
+            op, "only supports use_fast_accum=False for now");
+      }
+
+      opdTypes = {
+          op.getOperand(0).getType(),
+          op.getOperand(1).getType(),
+          op.getOperand(2).getType(),
+          op.getOperand(3).getType(),
+          op.getOperand(6).getType(),
+      };
+      opds = {
+          op.getOperand(0),
+          op.getOperand(1),
+          op.getOperand(2),
+          op.getOperand(3),
+          op.getOperand(6),
+      };
+    }
 
     // Materialize or retrieve the external function declaration.
     ModuleOp module = op->getParentOfType<ModuleOp>();
