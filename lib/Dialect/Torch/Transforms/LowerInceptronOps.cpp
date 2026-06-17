@@ -153,96 +153,6 @@ private:
   }
 };
 
-/// Rewrites inceptron.moe_scaled_mm torch.operator into a func.call.
-/// moe_scaled_mm(a, b, scale_a, scale_b, out_dtype) computes a @ b.T
-/// where b is in [N, K] PyTorch weight layout.
-class LowerMoeScaledMMPattern : public OpRewritePattern<OperatorOp> {
-public:
-  using OpRewritePattern<OperatorOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(OperatorOp op,
-                                PatternRewriter &rewriter) const override {
-    constexpr StringLiteral kMoeTargetOpName("inceptron.moe_scaled_mm");
-    if (op.getName().ltrim("torch.") != kMoeTargetOpName)
-      return failure();
-
-    auto opdTypes = TypeRange(op.getOperandTypes()).drop_back();
-    auto opds = op.getOperands().drop_back();
-
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    auto funcType = rewriter.getFunctionType(opdTypes, op.getResultTypes());
-    func::FuncOp callee =
-        getOrCreateCallee(module, funcType, op.getLoc(), rewriter);
-    if (!callee)
-      return failure();
-
-    auto call = rewriter.create<func::CallOp>(op.getLoc(), callee.getSymName(),
-                                              op.getResultTypes(), opds);
-    rewriter.replaceOp(op, call.getResults());
-    return success();
-  }
-
-private:
-  static constexpr StringLiteral kMoeCalleeName{"moe_scaled_mm"};
-
-  static std::string mangleFunctionName(const std::string &baseName,
-                                        FunctionType funcType) {
-    std::string name = baseName;
-
-    auto mangleTensorTypes = [](ValueTensorType type) -> std::string {
-      std::string name;
-      if (auto sizes = type.getOptionalSizes()) {
-        for (auto size : *sizes) {
-          if (size == -1) {
-            name += "_d";
-          } else {
-            name += "_" + std::to_string(size);
-          }
-        }
-      } else {
-        name += "_u";
-      }
-      return name;
-    };
-
-    for (Type type : funcType.getInputs()) {
-      if (auto tensorType = dyn_cast<ValueTensorType>(type)) {
-        name += mangleTensorTypes(tensorType);
-      }
-    }
-
-    name += "_ret";
-
-    for (Type type : funcType.getResults()) {
-      if (auto tensorType = dyn_cast<ValueTensorType>(type)) {
-        name += mangleTensorTypes(tensorType);
-      }
-    }
-    return name;
-  }
-
-  func::FuncOp getOrCreateCallee(ModuleOp module, FunctionType funcType,
-                                 Location loc,
-                                 PatternRewriter &rewriter) const {
-    SymbolTable symbolTable(module);
-
-    std::string calleeNameWithSuffix =
-        mangleFunctionName(kMoeCalleeName.str(), funcType);
-
-    if (auto existing =
-            symbolTable.lookup<func::FuncOp>(calleeNameWithSuffix)) {
-      return existing;
-    }
-
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(module.getBody());
-    auto callee =
-        rewriter.create<func::FuncOp>(loc, calleeNameWithSuffix, funcType);
-    callee.setVisibility(SymbolTable::Visibility::Private);
-    return callee;
-  }
-};
-
 struct LowerInceptronOps : public LowerInceptronOpsBase<LowerInceptronOps> {
   using Base::Base;
 
@@ -252,7 +162,6 @@ struct LowerInceptronOps : public LowerInceptronOpsBase<LowerInceptronOps> {
 
     RewritePatternSet patterns(context);
     patterns.add<LowerInceptronOpsPattern>(context);
-    patterns.add<LowerMoeScaledMMPattern>(context);
 
     if (failed(applyPatternsGreedily(module, std::move(patterns))))
       signalPassFailure();
