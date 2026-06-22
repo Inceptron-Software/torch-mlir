@@ -48,42 +48,56 @@ using namespace mlir::torch::Torch;
 
 namespace {
 
-constexpr StringLiteral kTargetOpName("inceptron.inceptron_scaled_mm");
-constexpr StringLiteral kCalleeName("inceptron_scaled_mm");
+constexpr StringLiteral kInceptronPrefix("inceptron.inceptron_");
 
 /// Rewrites Inceptron custom torch.operators into a direct func.call to an
 /// external function declaration. The declaration is created on-demand in the
 /// module with a signature that matches the specific operator instance.
+///
+/// Handles:
+/// - inceptron.inceptron_scaled_mm
+/// - inceptron.inceptron_moe_forward
+/// - inceptron.inceptron_moe_forward_shared
+/// - inceptron.inceptron_moe_forward_fp8
+/// - inceptron.inceptron_moe_forward_fp8_shared
 class LowerInceptronOpsPattern : public OpRewritePattern<OperatorOp> {
 public:
   using OpRewritePattern<OperatorOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(OperatorOp op,
-                                PatternRewriter &rewriter) const override {
-    if (op.getName().ltrim("torch.") != kTargetOpName)
+                                 PatternRewriter &rewriter) const override {
+    auto opName = op.getName().ltrim("torch.");
+    if (!opName.starts_with(kInceptronPrefix))
       return failure();
 
-    // Check that the bias operand is torch.constant.none.
-    // TODO: Support non-none bias.
-    Value biasOperand = op.getOperand(5);
-    auto constNoneOp = biasOperand.getDefiningOp<ConstantNoneOp>();
-    if (!constNoneOp) {
-      return rewriter.notifyMatchFailure(op, "only supports bias=None for now");
-    }
+    // Determine the callee base name (strip "inceptron." prefix).
+    std::string calleeBase =
+        opName.drop_front(strlen("inceptron.")).str();
 
-    auto opdTypes = TypeRange(op.getOperandTypes()).drop_back();
-    auto opds = op.getOperands().drop_back();
+    // Filter out !torch.none operands -- they represent optional Tensor? args
+    // that were None in the FX graph. The downstream MLIR ops don't have these
+    // operands.
+    SmallVector<Value> callOperands;
+    SmallVector<Type> callOperandTypes;
+    for (auto [operand, type] :
+         llvm::zip(op.getOperands(), op.getOperandTypes())) {
+      if (isa<Torch::NoneType>(type))
+        continue;
+      callOperands.push_back(operand);
+      callOperandTypes.push_back(type);
+    }
 
     // Materialize or retrieve the external function declaration.
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    auto funcType = rewriter.getFunctionType(opdTypes, op.getResultTypes());
+    auto funcType =
+        rewriter.getFunctionType(callOperandTypes, op.getResultTypes());
     func::FuncOp callee =
-        getOrCreateCallee(module, funcType, op.getLoc(), rewriter);
+        getOrCreateCallee(module, funcType, calleeBase, op.getLoc(), rewriter);
     if (!callee)
       return failure();
 
     auto call = rewriter.create<func::CallOp>(op.getLoc(), callee.getSymName(),
-                                              op.getResultTypes(), opds);
+                                              op.getResultTypes(), callOperands);
     rewriter.replaceOp(op, call.getResults());
     return success();
   }
@@ -92,7 +106,7 @@ private:
   // Create a mangled function name based on the base name and the function
   // type.
   static std::string mangleFunctionName(const std::string &baseName,
-                                        FunctionType funcType) {
+                                         FunctionType funcType) {
     std::string name = baseName;
 
     auto mangleTensorTypes = [](ValueTensorType type) -> std::string {
@@ -115,8 +129,10 @@ private:
     for (Type type : funcType.getInputs()) {
       if (auto tensorType = dyn_cast<ValueTensorType>(type)) {
         name += mangleTensorTypes(tensorType);
+      } else if (isa<Torch::IntType>(type)) {
+        name += "_i";
       }
-      // ingore non-tensor types for now
+      // ingore other non-tensor/non-int types for now
     }
 
     name += "_ret";
@@ -130,12 +146,12 @@ private:
   }
 
   func::FuncOp getOrCreateCallee(ModuleOp module, FunctionType funcType,
-                                 Location loc,
+                                 const std::string &calleeBase, Location loc,
                                  PatternRewriter &rewriter) const {
     SymbolTable symbolTable(module);
 
     std::string calleeNameWithSuffix =
-        mangleFunctionName(kCalleeName.str(), funcType);
+        mangleFunctionName(calleeBase, funcType);
 
     if (auto existing =
             symbolTable.lookup<func::FuncOp>(calleeNameWithSuffix)) {
