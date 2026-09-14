@@ -717,29 +717,35 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
       gelu.emitError("unimplemented: non-floating point dtype");
       return nullptr;
     }
-    // TODO: Take approximation into account.
     std::string approximate;
     if (!matchPattern(gelu.getApproximate(), m_TorchConstantStr(approximate))) {
       gelu.emitError(
           "unimplemented: expected approximate to be a constant str");
       return nullptr;
     }
+    Type resultType = payloadArgs[0].getType();
+    Type computationType = resultType;
+    if (resultType.isF16() || resultType.isBF16())
+      computationType = b.getF32Type();
+    Value input =
+        convertScalarToDtype(b, loc, payloadArgs[0], computationType);
     if (approximate == "none") {
-      Value multiplier = buildUnitNormalCdf(b, loc, payloadArgs[0]);
-      return b.create<arith::MulFOp>(loc, payloadArgs[0], multiplier);
+      Value multiplier = buildUnitNormalCdf(b, loc, input);
+      Value result = b.create<arith::MulFOp>(loc, input, multiplier);
+      return convertScalarToDtype(b, loc, result, resultType);
     }
     if (approximate == "tanh") {
       // GELU(x)=0.5∗x∗(1+Tanh((2/π)^1/2 * (x+0.044715∗x^3)))
       // Ref: https://pytorch.org/docs/stable/generated/torch.nn.GELU.html
       Value cstThree = b.create<arith::ConstantOp>(
           loc, IntegerAttr::get(IntegerType::get(op->getContext(), 64), 3));
-      Value xCube = b.create<math::FPowIOp>(loc, payloadArgs[0], cstThree);
-      Type elementType = payloadArgs[0].getType();
+      Value xCube = b.create<math::FPowIOp>(loc, input, cstThree);
+      Type elementType = input.getType();
       Value cstAlpha = b.create<arith::ConstantOp>(
           loc, FloatAttr::get(elementType, 0.044715));
       Value xCubeMulAlpha = b.create<arith::MulFOp>(loc, xCube, cstAlpha);
       Value xPlusXCubeMulAlpha =
-          b.create<arith::AddFOp>(loc, payloadArgs[0], xCubeMulAlpha);
+          b.create<arith::AddFOp>(loc, input, xCubeMulAlpha);
       Value cstBeta = b.create<arith::ConstantOp>(
           loc, FloatAttr::get(elementType, 0.7977240352174656));
       Value betaMulX =
@@ -751,7 +757,8 @@ static Value createLinalgPayloadCalculationForElementwiseOp(
       Value cstHalf =
           b.create<arith::ConstantOp>(loc, FloatAttr::get(elementType, 0.5));
       Value multiplier = b.create<arith::MulFOp>(loc, cstHalf, onePlusTanh);
-      return b.create<arith::MulFOp>(loc, payloadArgs[0], multiplier);
+      Value result = b.create<arith::MulFOp>(loc, input, multiplier);
+      return convertScalarToDtype(b, loc, result, resultType);
     }
     gelu.emitError("unimplemented: approximate value should be none or tanh");
     return nullptr;

@@ -131,3 +131,20 @@ func.func @elementwise_add_non_broadcast_unit_dims(%arg0: !torch.vtensor<[6,1],b
   %11 = torch.aten.add.Tensor %arg0, %arg1, %int1_13 : !torch.vtensor<[6,1],bf16>, !torch.vtensor<[1],bf16>, !torch.int -> !torch.vtensor<[6,1],bf16>
   return %11 : !torch.vtensor<[6,1],bf16>
 }
+// CHECK-LABEL:   func.func @elementwise$gelu_f16(
+// CHECK-SAME:                                    %[[ARG:.*]]: !torch.vtensor<[?],f16>) -> !torch.vtensor<[?],f16> {
+// CHECK:           %[[BUILTIN_TENSOR:.*]] = torch_c.to_builtin_tensor %[[ARG]] : !torch.vtensor<[?],f16> -> tensor<?xf16>
+// CHECK:           linalg.generic
+// CHECK:           ^bb0(%[[INPUT:.*]]: f16, %{{.*}}: f16):
+// CHECK:             %[[INPUT_F32:.*]] = arith.extf %[[INPUT]] : f16 to f32
+// CHECK:             %[[ERF:.*]] = math.erf {{.*}} : f32
+// CHECK:             %[[RESULT_F32:.*]] = arith.mulf %[[INPUT_F32]], {{.*}} : f32
+// CHECK:             %[[RESULT_F16:.*]] = arith.truncf %[[RESULT_F32]] : f32 to f16
+// CHECK:             linalg.yield %[[RESULT_F16]] : f16
+func.func @elementwise$gelu_f16(%arg0: !torch.vtensor<[?],f16>) -> !torch.vtensor<[?],f16> {
+  %none = torch.constant.str "none"
+  %0 = torch.aten.gelu %arg0, %none : !torch.vtensor<[?],f16>, !torch.str -> !torch.vtensor<[?],f16>
+  return %0 : !torch.vtensor<[?],f16>
+}
+
+// -----
