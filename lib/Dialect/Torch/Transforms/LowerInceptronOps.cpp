@@ -26,17 +26,25 @@
  * SELL ANYTHING THAT IT MAY DESCRIBE, IN WHOLE OR IN PART.
  */
 
-#include "PassDetail.h"
-
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/TypeRange.h"
+#include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchTypes.h"
 #include "torch-mlir/Dialect/Torch/Transforms/Passes.h"
+
+using namespace mlir;
+using namespace mlir::torch;
+using namespace mlir::torch::Torch;
+namespace mlir::torch::Torch {
+
+#define GEN_PASS_DECL_LOWERINCEPTRONOPS
+#define GEN_PASS_DEF_LOWERINCEPTRONOPS
+#include "torch-mlir/Dialect/Torch/Transforms/Passes.h.inc"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/iterator_range.h"
 #include <cstdint>
@@ -169,8 +177,8 @@ private:
   }
 };
 
-struct LowerInceptronOps : public LowerInceptronOpsBase<LowerInceptronOps> {
-  using Base::Base;
+struct LowerInceptronOps : public impl::LowerInceptronOpsBase<LowerInceptronOps> {
+  using impl::LowerInceptronOpsBase<LowerInceptronOps>::LowerInceptronOpsBase;
 
   void runOnOperation() final {
     ModuleOp module = getOperation();
@@ -185,6 +193,8 @@ struct LowerInceptronOps : public LowerInceptronOpsBase<LowerInceptronOps> {
 };
 
 } // namespace
+
+} // namespace mlir::torch::Torch
 
 std::unique_ptr<OperationPass<ModuleOp>>
 mlir::torch::Torch::createLowerInceptronOpsPass() {

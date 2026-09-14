@@ -13144,7 +13144,6 @@ public:
         for (int64_t size : inputSizes)
           flattenedInputSize *= size;
       }
-      }
 
       auto flattenedInputTy =
           cast<BaseTensorType>(inputType.getWithSizesAndDtype(
