@@ -7421,8 +7421,11 @@ class DecomposeAtenLayerNormOp : public OpRewritePattern<AtenLayerNormOp> {
     std::vector<int64_t> meanVarSizes(inputRank, 1);
     for (int i = 0; i < axis; i++)
       meanVarSizes[i] = input.getSizes()[i];
-    auto meanVarType = input.getWithSizesAndDtype(llvm::ArrayRef(meanVarSizes),
-                                                  input.getOptionalDtype());
+    Type statisticsDtype = input.getDtype();
+    if (statisticsDtype.isF16() || statisticsDtype.isBF16())
+      statisticsDtype = rewriter.getF32Type();
+    auto meanVarType = input.getWithSizesAndDtype(
+        llvm::ArrayRef(meanVarSizes), statisticsDtype);
     auto nativeLayerNorm = rewriter.create<AtenNativeLayerNormOp>(
         loc, op.getType(), meanVarType, meanVarType, op.getInput(),
         op.getNormalizedShape(), op.getWeight(), op.getBias(), op.getEps());
@@ -7646,7 +7649,15 @@ class DecomposeAtenNativeLayerNormOp
     int64_t axis = inputRank - normalizedShapeSizesTorchInt.size();
     auto reduceDimInts =
         llvm::to_vector<4>(llvm::seq<int64_t>(axis, inputRank));
-    auto reducedTy = op.getResult(1).getType();
+    auto reducedTy = cast<ValueTensorType>(op.getResult(1).getType());
+    Type computationDtype = inputTy.getDtype();
+    if (computationDtype.isF16() || computationDtype.isBF16())
+      computationDtype = rewriter.getF32Type();
+    auto computationTy = cast<ValueTensorType>(inputTy.getWithSizesAndDtype(
+        inputTy.getOptionalSizes(), computationDtype));
+    auto reducedComputationTy =
+        cast<ValueTensorType>(reducedTy.getWithSizesAndDtype(
+            reducedTy.getOptionalSizes(), computationDtype));
     auto sizeListType = ListType::get(IntType::get(context));
 
     // build reduce dims
@@ -7664,61 +7675,77 @@ class DecomposeAtenNativeLayerNormOp
 
     Value cstTrue = rewriter.create<Torch::ConstantBoolOp>(loc, true);
     Value none = rewriter.create<Torch::ConstantNoneOp>(loc);
+    Value computationInput = op.getInput();
+    if (inputTy.getDtype() != computationTy.getDtype())
+      computationInput = convertTensorToDtype(
+          rewriter, loc, computationInput, computationTy.getDtype());
+
     // mean(x)
     Value inputMean = rewriter.create<AtenMeanDimOp>(
-        loc, reducedTy, op.getInput(), reduceDimList, cstTrue, none);
+        loc, reducedComputationTy, computationInput, reduceDimList, cstTrue,
+        none);
 
-    Value inputMeanCasted =
-        convertTensorToDtype(rewriter, loc, inputMean, inputTy.getDtype());
     // x - mean(x)
     Value inputMeanExpanded = rewriter.create<AtenExpandAsOp>(
-        loc, inputTy, inputMeanCasted, op.getInput());
+        loc, computationTy, inputMean, computationInput);
     Value inputZeroMean = rewriter.create<AtenSubTensorOp>(
-        loc, inputTy, op.getInput(), inputMeanExpanded, one);
+        loc, computationTy, computationInput, inputMeanExpanded, one);
     // var(x) = mean((x - mean(x))^2)
     Value inputZeroMeanSquare = rewriter.create<AtenMulTensorOp>(
-        loc, inputTy, inputZeroMean, inputZeroMean);
+        loc, computationTy, inputZeroMean, inputZeroMean);
     Value inputVar = rewriter.create<AtenMeanDimOp>(
-        loc, reducedTy, inputZeroMeanSquare, reduceDimList, cstTrue, none);
+        loc, reducedComputationTy, inputZeroMeanSquare, reduceDimList, cstTrue,
+        none);
 
     // rsqrt(var(x) + eps)
     Value inputVarPlusEps = rewriter.create<AtenAddScalarOp>(
-        loc, reducedTy, inputVar, op.getEps(), one);
+        loc, reducedComputationTy, inputVar, op.getEps(), one);
     Value inputRsqrtVar =
-        rewriter.create<AtenRsqrtOp>(loc, reducedTy, inputVarPlusEps);
+        rewriter.create<AtenRsqrtOp>(loc, reducedComputationTy,
+                                     inputVarPlusEps);
 
-    Value inputRsqrtVarCasted =
-        convertTensorToDtype(rewriter, loc, inputRsqrtVar, inputTy.getDtype());
     // (x - mean(x)) * rsqrt(var(x) + eps)
     Value inputRsqrtVarExpanded = rewriter.create<AtenExpandAsOp>(
-        loc, inputTy, inputRsqrtVarCasted, op.getInput());
+        loc, computationTy, inputRsqrtVar, computationInput);
     Value inputNormalized = rewriter.create<AtenMulTensorOp>(
-        loc, inputTy, inputZeroMean, inputRsqrtVarExpanded);
-    // Convert resultType if dtype is different
-    auto resultTensorType =
-        dyn_cast<ValueTensorType>(op.getResult(0).getType());
-    if (inputTy.getDtype() != resultTensorType.getDtype()) {
-      Value dtypeValue = Torch::getDtypeIntValueForType(
-          rewriter, loc, resultTensorType.getDtype());
-      Value cstFalse = rewriter.create<Torch::ConstantBoolOp>(loc, false);
-      inputNormalized = rewriter.create<Torch::AtenToDtypeOp>(
-          loc, resultTensorType, inputNormalized,
-          /*dtype=*/dtypeValue, /*non_blocking=*/cstFalse, /*copy=*/cstFalse,
-          /*memory_format=*/none);
-    }
-    Value out = rewriter.create<TensorStaticInfoCastOp>(
-        loc, op.getResult(0).getType(), inputNormalized);
+        loc, computationTy, inputZeroMean, inputRsqrtVarExpanded);
 
+    Value out = inputNormalized;
     Value weight = op.getWeight();
     Value bias = op.getBias();
     if (!isa<Torch::NoneType>(weight.getType())) {
-      out = rewriter.create<AtenMulTensorOp>(loc, out.getType(), out, weight);
+      auto weightTy = cast<ValueTensorType>(weight.getType());
+      if (weightTy.getDtype() != computationTy.getDtype())
+        weight = convertTensorToDtype(rewriter, loc, weight,
+                                      computationTy.getDtype());
+      out = rewriter.create<AtenMulTensorOp>(loc, computationTy, out, weight);
     }
     if (!isa<Torch::NoneType>(bias.getType())) {
-      out =
-          rewriter.create<AtenAddTensorOp>(loc, out.getType(), out, bias, one);
+      auto biasTy = cast<ValueTensorType>(bias.getType());
+      if (biasTy.getDtype() != computationTy.getDtype())
+        bias = convertTensorToDtype(rewriter, loc, bias,
+                                    computationTy.getDtype());
+      out = rewriter.create<AtenAddTensorOp>(loc, computationTy, out, bias,
+                                             one);
     }
-    rewriter.replaceOp(op, {out, inputMean, inputRsqrtVar});
+
+    // Cast only the final affine result back to the declared output dtype.
+    auto resultTensorType =
+        dyn_cast<ValueTensorType>(op.getResult(0).getType());
+    if (computationTy.getDtype() != resultTensorType.getDtype())
+      out = convertTensorToDtype(rewriter, loc, out,
+                                 resultTensorType.getDtype());
+    out = rewriter.create<TensorStaticInfoCastOp>(
+        loc, op.getResult(0).getType(), out);
+    Value returnedMean = inputMean;
+    Value returnedRsqrtVar = inputRsqrtVar;
+    if (computationDtype != reducedTy.getDtype()) {
+      returnedMean = convertTensorToDtype(rewriter, loc, returnedMean,
+                                          reducedTy.getDtype());
+      returnedRsqrtVar = convertTensorToDtype(
+          rewriter, loc, returnedRsqrtVar, reducedTy.getDtype());
+    }
+    rewriter.replaceOp(op, {out, returnedMean, returnedRsqrtVar});
 
     return success();
   }
