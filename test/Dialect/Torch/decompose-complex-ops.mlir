@@ -771,6 +771,32 @@ func.func @torch.aten.stft.center_2D_hop_length_3_window_pad_both(%arg0: !torch.
 // -----
 
 
+// CHECK-LABEL:  func.func @layer_norm_f16(
+// CHECK-SAME:          %[[ARG0:.*]]: !torch.vtensor<[2,4],f16>, %[[ARG1:.*]]: !torch.vtensor<[4],f16>, %[[ARG2:.*]]: !torch.vtensor<[4],f16>, %[[ARG3:.*]]: !torch.float, %[[ARG4:.*]]: !torch.bool) -> !torch.vtensor<[2,4],f16> {
+// CHECK-DAG:      %[[INT5:.*]] = torch.constant.int 5
+// CHECK-DAG:      %[[INT6:.*]] = torch.constant.int 6
+// CHECK-DAG:      %[[FALSE:.*]] = torch.constant.bool false
+// CHECK-DAG:      %[[NONE:.*]] = torch.constant.none
+// CHECK:          %[[INPUT_F32:.*]] = torch.aten.to.dtype %[[ARG0]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[2,4],f16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[2,4],f32>
+// CHECK:          %[[MEAN:.*]] = torch.aten.sum.dim_IntList %[[INPUT_F32]], {{.*}} : !torch.vtensor<[2,4],f32>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[2,1],f32>
+// CHECK:          %[[CENTERED:.*]] = torch.aten.sub.Tensor %[[INPUT_F32]], {{.*}} : !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32>, !torch.int -> !torch.vtensor<[2,4],f32>
+// CHECK:          %[[SQUARED:.*]] = torch.aten.mul.Tensor %[[CENTERED]], %[[CENTERED]] : !torch.vtensor<[2,4],f32>, !torch.vtensor<[2,4],f32> -> !torch.vtensor<[2,4],f32>
+// CHECK:          %[[VARIANCE:.*]] = torch.aten.sum.dim_IntList %[[SQUARED]], {{.*}} : !torch.vtensor<[2,4],f32>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[2,1],f32>
+// CHECK:          %[[RSQRT:.*]] = torch.aten.rsqrt {{.*}} : !torch.vtensor<[2,1],f32> -> !torch.vtensor<[2,1],f32>
+// CHECK:          %[[WEIGHT_F32:.*]] = torch.aten.to.dtype %[[ARG1]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[4],f16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[4],f32>
+// CHECK:          %[[BIAS_F32:.*]] = torch.aten.to.dtype %[[ARG2]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[4],f16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[4],f32>
+// CHECK:          %[[RESULT:.*]] = torch.aten.to.dtype {{.*}}, %[[INT5]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[2,4],f32>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[2,4],f16>
+// CHECK:          return %[[RESULT]] : !torch.vtensor<[2,4],f16>
+func.func @layer_norm_f16(%input: !torch.vtensor<[2,4],f16>, %weight: !torch.vtensor<[4],f16>, %bias: !torch.vtensor<[4],f16>, %eps: !torch.float, %cudnn_enable: !torch.bool) -> !torch.vtensor<[2,4],f16> {
+  %int4 = torch.constant.int 4
+  %normalized_shape = torch.prim.ListConstruct %int4 : (!torch.int) -> !torch.list<int>
+  %result = torch.aten.layer_norm %input, %normalized_shape, %weight, %bias, %eps, %cudnn_enable : !torch.vtensor<[2,4],f16>, !torch.list<int>, !torch.vtensor<[4],f16>, !torch.vtensor<[4],f16>, !torch.float, !torch.bool -> !torch.vtensor<[2,4],f16>
+  return %result : !torch.vtensor<[2,4],f16>
+}
+
+
+// -----
+
 // CHECK-LABEL:  func.func @native_layer_norm(
 // CHECK-SAME:          %[[ARG0:.*]]: !torch.vtensor<[1,56,56,96],f32>, %[[ARG1:.*]]: !torch.list<int>, %[[ARG2:.*]]: !torch.vtensor<[96],f32>, %[[ARG3:.*]]: !torch.vtensor<[96],f32>, %[[ARG4:.*]]: !torch.float) -> (!torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>) {
 // CHECK-DAG:      %[[INT96:.*]] = torch.constant.int 96
@@ -811,31 +837,34 @@ func.func @native_layer_norm(%input: !torch.vtensor<[1,56,56,96],f32>, %normaliz
 // CHECK-DAG:      %[[INT96:.*]] = torch.constant.int 96
 // CHECK-DAG:      %[[INT56:.*]] = torch.constant.int 56
 // CHECK-DAG:      %[[INT15:.*]] = torch.constant.int 15
+// CHECK-DAG:      %[[INT6:.*]] = torch.constant.int 6
 // CHECK-DAG:      %[[FALSE:.*]] = torch.constant.bool false
 // CHECK-DAG:      %[[NONE:.*]] = torch.constant.none
 // CHECK-DAG:      %[[TRUE:.*]] = torch.constant.bool true
 // CHECK-DAG:      %[[INT1:.*]] = torch.constant.int 1
 // CHECK:          %[[VAR0:.*]] = torch.prim.ListConstruct  : () -> !torch.list<int>
-// CHECK:          %[[VAR1:.*]] = torch.aten.sum.dim_IntList %[[ARG0]], %[[VAR0]], %[[TRUE]], %[[NONE]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],f32>
-// CHECK:          %[[VAR2:.*]] = torch.aten.numel %[[ARG0]] : !torch.vtensor<[1,56,56,96],bf16> -> !torch.int
+// CHECK:          %[[INPUT_F32:.*]] = torch.aten.to.dtype %[[ARG0]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[VAR1:.*]] = torch.aten.sum.dim_IntList %[[INPUT_F32]], %[[VAR0]], %[[TRUE]], %[[NONE]] : !torch.vtensor<[1,56,56,96],f32>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],f32>
+// CHECK:          %[[VAR2:.*]] = torch.aten.numel %[[INPUT_F32]] : !torch.vtensor<[1,56,56,96],f32> -> !torch.int
 // CHECK:          %[[VAR3:.*]] = torch.aten.div.Scalar %[[VAR1]], %[[VAR2]] : !torch.vtensor<[1,56,56,1],f32>, !torch.int -> !torch.vtensor<[1,56,56,1],f32>
-// CHECK:          %[[VAR4:.*]] = torch.aten.to.dtype %[[VAR3]], %[[INT15]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[1,56,56,1],f32>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],bf16>
 // CHECK:          %[[VAR5:.*]] = torch.prim.ListConstruct %int1, %int56, %int56, %int96 : (!torch.int, !torch.int, !torch.int, !torch.int) -> !torch.list<int>
-// CHECK:          %[[VAR6:.*]] = torch.aten.broadcast_to %[[VAR4]], %[[VAR5]] : !torch.vtensor<[1,56,56,1],bf16>, !torch.list<int> -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR7:.*]] = torch.aten.sub.Tensor %[[ARG0]], %[[VAR6]], %int1 : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,96],bf16>, !torch.int -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR8:.*]] = torch.aten.mul.Tensor %[[VAR7]], %[[VAR7]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,96],bf16> -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR9:.*]] = torch.aten.sum.dim_IntList %[[VAR8]], %0, %true, %none : !torch.vtensor<[1,56,56,96],bf16>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],f32>
-// CHECK:          %[[VAR10:.*]] = torch.aten.numel %8 : !torch.vtensor<[1,56,56,96],bf16> -> !torch.int
+// CHECK:          %[[VAR6:.*]] = torch.aten.broadcast_to %[[VAR3]], %[[VAR5]] : !torch.vtensor<[1,56,56,1],f32>, !torch.list<int> -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[VAR7:.*]] = torch.aten.sub.Tensor %[[INPUT_F32]], %[[VAR6]], %int1 : !torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[1,56,56,96],f32>, !torch.int -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[VAR8:.*]] = torch.aten.mul.Tensor %[[VAR7]], %[[VAR7]] : !torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[1,56,56,96],f32> -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[VAR9:.*]] = torch.aten.sum.dim_IntList %[[VAR8]], %0, %true, %none : !torch.vtensor<[1,56,56,96],f32>, !torch.list<int>, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],f32>
+// CHECK:          %[[VAR10:.*]] = torch.aten.numel %8 : !torch.vtensor<[1,56,56,96],f32> -> !torch.int
 // CHECK:          %[[VAR11:.*]] = torch.aten.div.Scalar %[[VAR9]], %[[VAR10]] : !torch.vtensor<[1,56,56,1],f32>, !torch.int -> !torch.vtensor<[1,56,56,1],f32>
 // CHECK:          %[[VAR12:.*]] = torch.aten.add.Scalar %[[VAR11]], %[[ARG4]], %int1 : !torch.vtensor<[1,56,56,1],f32>, !torch.float, !torch.int -> !torch.vtensor<[1,56,56,1],f32>
 // CHECK:          %[[VAR13:.*]] = torch.aten.rsqrt %[[VAR12]] : !torch.vtensor<[1,56,56,1],f32> -> !torch.vtensor<[1,56,56,1],f32>
-// CHECK:          %[[VAR14:.*]] = torch.aten.to.dtype %[[VAR13]], %[[INT15]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[1,56,56,1],f32>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,1],bf16>
 // CHECK:          %[[VAR15:.*]] = torch.prim.ListConstruct %int1, %int56, %int56, %int96 : (!torch.int, !torch.int, !torch.int, !torch.int) -> !torch.list<int>
-// CHECK:          %[[VAR16:.*]] = torch.aten.broadcast_to %[[VAR14]], %[[VAR15]] : !torch.vtensor<[1,56,56,1],bf16>, !torch.list<int> -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR17:.*]] = torch.aten.mul.Tensor %[[VAR7]], %[[VAR16]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,96],bf16> -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR18:.*]] = torch.aten.mul.Tensor %[[VAR17]], %[[ARG2]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[96],bf16> -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          %[[VAR19:.*]] = torch.aten.add.Tensor %[[VAR18]], %[[ARG3]], %int1 : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[96],bf16>, !torch.int -> !torch.vtensor<[1,56,56,96],bf16>
-// CHECK:          return %[[VAR19]], %[[VAR3]], %[[VAR13]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>
+// CHECK:          %[[VAR16:.*]] = torch.aten.broadcast_to %[[VAR13]], %[[VAR15]] : !torch.vtensor<[1,56,56,1],f32>, !torch.list<int> -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[VAR17:.*]] = torch.aten.mul.Tensor %[[VAR7]], %[[VAR16]] : !torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[1,56,56,96],f32> -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[WEIGHT_F32:.*]] = torch.aten.to.dtype %[[ARG2]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[96],bf16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[96],f32>
+// CHECK:          %[[VAR18:.*]] = torch.aten.mul.Tensor %[[VAR17]], %[[WEIGHT_F32]] : !torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[96],f32> -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[BIAS_F32:.*]] = torch.aten.to.dtype %[[ARG3]], %[[INT6]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[96],bf16>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[96],f32>
+// CHECK:          %[[VAR19:.*]] = torch.aten.add.Tensor %[[VAR18]], %[[BIAS_F32]], %int1 : !torch.vtensor<[1,56,56,96],f32>, !torch.vtensor<[96],f32>, !torch.int -> !torch.vtensor<[1,56,56,96],f32>
+// CHECK:          %[[RESULT:.*]] = torch.aten.to.dtype %[[VAR19]], %[[INT15]], %[[FALSE]], %[[FALSE]], %[[NONE]] : !torch.vtensor<[1,56,56,96],f32>, !torch.int, !torch.bool, !torch.bool, !torch.none -> !torch.vtensor<[1,56,56,96],bf16>
+// CHECK:          return %[[RESULT]], %[[VAR3]], %[[VAR13]] : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>
 func.func @native_layer_norm_mixed_dtypes(%input: !torch.vtensor<[1,56,56,96],bf16>, %normalized_shape: !torch.list<int>, %weight: !torch.vtensor<[96],bf16>, %bias: !torch.vtensor<[96],bf16>, %eps: !torch.float) -> (!torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>) {
   %result, %mean, %rstd = torch.aten.native_layer_norm %input, %normalized_shape, %weight, %bias, %eps : !torch.vtensor<[1,56,56,96],bf16>, !torch.list<int>, !torch.vtensor<[96],bf16>, !torch.vtensor<[96],bf16>, !torch.float -> !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>
   return %result, %mean, %rstd : !torch.vtensor<[1,56,56,96],bf16>, !torch.vtensor<[1,56,56,1],f32>, !torch.vtensor<[1,56,56,1],f32>
