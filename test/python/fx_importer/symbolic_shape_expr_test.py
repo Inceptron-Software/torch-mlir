@@ -502,3 +502,26 @@ def test_nonzero():
         import_symbolic_shape_expressions=True,
     )
     print(m)
+
+
+@run
+# CHECK-LABEL: test_symbolic_integer_negation
+# CHECK:        %[[FLOORDIV:.+]] = torch.aten.floordiv.int
+# CHECK:        %[[NEG:.+]] = torch.aten.neg.int %[[FLOORDIV]]
+# CHECK:        return %{{.*}}, %[[NEG]]
+def test_symbolic_integer_negation():
+    class SymbolicIntegerNegation(torch.nn.Module):
+        def forward(self, x):
+            rows = x.shape[0]
+            return x, -(rows // -4)
+
+    x = torch.randn(8, 3)
+    batch = Dim("batch", min=1, max=128)
+
+    m = fx.export_and_import(
+        SymbolicIntegerNegation(),
+        x,
+        dynamic_shapes={"x": {0: batch}},
+        import_symbolic_shape_expressions=True,
+    )
+    print(m)
