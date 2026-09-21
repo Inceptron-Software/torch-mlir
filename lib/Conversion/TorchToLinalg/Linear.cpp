@@ -203,6 +203,143 @@ public:
     return success();
   }
 };
+
+static FailureOr<Value>
+getSingleTensorListElement(Value listValue, const TypeConverter *typeConverter,
+                           Location loc, ConversionPatternRewriter &rewriter,
+                           Operation *op, StringRef description) {
+  auto list = listValue.getDefiningOp<PrimListConstructOp>();
+  if (!list || list.getElements().size() != 1) {
+    (void)rewriter.notifyMatchFailure(
+        op, Twine(description) + " must be a one-element tensor list");
+    return failure();
+  }
+  Value element = list.getElements().front();
+  Type convertedType = typeConverter->convertType(element.getType());
+  if (!convertedType) {
+    (void)rewriter.notifyMatchFailure(
+        op, Twine("cannot convert ") + description + " tensor type");
+    return failure();
+  }
+  Value converted = typeConverter->materializeTargetConversion(
+      rewriter, loc, convertedType, element);
+  if (!converted) {
+    (void)rewriter.notifyMatchFailure(
+        op, Twine("cannot materialize ") + description + " tensor");
+    return failure();
+  }
+  return converted;
+}
+
+static bool matchesConstantIntList(Value value, ArrayRef<int64_t> expected) {
+  SmallVector<int64_t> observed;
+  return matchPattern(value, m_TorchListOfConstantInts(observed)) &&
+         observed == expected;
+}
+
+class ConvertAten_ScaledMmV2Op
+    : public OpConversionPattern<Aten_ScaledMmV2Op> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(Aten_ScaledMmV2Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value lhs = adaptor.getSelf();
+    Value rhs = adaptor.getMat2();
+    auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
+    auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
+    auto resultType = dyn_cast<TensorType>(
+        getTypeConverter()->convertType(op.getType()));
+    if (!lhsType || !rhsType || !resultType)
+      return rewriter.notifyMatchFailure(op, "requires ranked tensor types");
+    if (lhsType.getRank() != 2 || rhsType.getRank() != 2)
+      return rewriter.notifyMatchFailure(op, "requires rank-two operands");
+    if (!isa<Float8E4M3FNType>(lhsType.getElementType()) ||
+        !isa<Float8E4M3FNType>(rhsType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "requires E4M3FN operands");
+    if (!isa<BFloat16Type>(resultType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "requires a BF16 result");
+
+    if (!matchesConstantIntList(op.getRecipeA(), {0}) ||
+        !matchesConstantIntList(op.getRecipeB(), {0}))
+      return rewriter.notifyMatchFailure(
+          op, "supports only tensor-wise scaling recipes");
+    if (!matchesConstantIntList(op.getSwizzleA(), {}) ||
+        !matchesConstantIntList(op.getSwizzleB(), {}))
+      return rewriter.notifyMatchFailure(op, "does not support swizzles");
+    if (!matchesConstantIntList(op.getContractionDim(), {}))
+      return rewriter.notifyMatchFailure(
+          op, "does not support contraction dimensions");
+    if (!isa<Torch::NoneType>(op.getBias().getType()))
+      return rewriter.notifyMatchFailure(op, "does not support bias");
+
+    int64_t outputDtype;
+    if (!matchPattern(op.getOutDtype(), m_TorchConstantInt(&outputDtype)) ||
+        outputDtype != static_cast<int64_t>(
+                           torch_upstream::ScalarType::BFloat16))
+      return rewriter.notifyMatchFailure(op, "requires BF16 output dtype");
+    bool useFastAccum;
+    if (!matchPattern(op.getUseFastAccum(),
+                      m_TorchConstantBool(&useFastAccum)) ||
+        useFastAccum)
+      return rewriter.notifyMatchFailure(
+          op, "does not support fast accumulation");
+
+    FailureOr<Value> lhsScale = getSingleTensorListElement(
+        op.getScaleA(), getTypeConverter(), loc, rewriter, op,
+        "left scale");
+    FailureOr<Value> rhsScale = getSingleTensorListElement(
+        op.getScaleB(), getTypeConverter(), loc, rewriter, op,
+        "right scale");
+    if (failed(lhsScale) || failed(rhsScale))
+      return failure();
+    for (Value scale : {*lhsScale, *rhsScale}) {
+      auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
+      if (!scaleType || scaleType.getRank() != 1 ||
+          scaleType.getDimSize(0) != 1 || !scaleType.getElementType().isF32())
+        return rewriter.notifyMatchFailure(
+            op, "requires one-element FP32 scale tensors");
+    }
+
+    Value lhsDim0 = tensor::DimOp::create(rewriter, loc, lhs, 0);
+    Value lhsDim1 = tensor::DimOp::create(rewriter, loc, lhs, 1);
+    Value rhsDim0 = tensor::DimOp::create(rewriter, loc, rhs, 0);
+    Value rhsDim1 = tensor::DimOp::create(rewriter, loc, rhs, 1);
+    if (!isAssumingStrictSymbolicShapes(rewriter)) {
+      Value contractingDimEqual = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::eq, lhsDim1, rhsDim0);
+      cf::AssertOp::create(
+          rewriter, loc, contractingDimEqual,
+          rewriter.getStringAttr(
+              "mismatching contracting dimension for torch.aten._scaled_mm_v2"));
+    }
+
+    Type accumulatorType = rewriter.getF32Type();
+    Value zeroFill = createZeroInitTensor(
+        rewriter, loc, ValueRange{lhsDim0, rhsDim1}, accumulatorType);
+    Value accumulated =
+        linalg::MatmulOp::create(rewriter, loc, zeroFill.getType(),
+                                ValueRange{lhs, rhs}, zeroFill)
+            .getResult(0);
+    auto multiply = [&](Value value, Value scale) {
+      return torch_to_linalg::createElementwiseLinalgGeneric(
+          rewriter, loc, ValueRange{value, scale}, accumulatorType,
+          [&](OpBuilder &builder, Location bodyLoc, ValueRange args) {
+            Value product =
+                arith::MulFOp::create(builder, bodyLoc, args[0], args[1]);
+            linalg::YieldOp::create(builder, bodyLoc, product);
+          });
+    };
+    Value scaled = multiply(accumulated, *lhsScale);
+    scaled = multiply(scaled, *rhsScale);
+    Value converted = torch_to_linalg::convertTensorToElementType(
+        rewriter, loc, scaled, resultType.getElementType());
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, converted);
+    return success();
+  }
+};
 } // namespace
 
 namespace {
@@ -2522,6 +2659,8 @@ void mlir::torch::torch_to_linalg::populateLinearPatternsAndLegality(
   MLIRContext *context = patterns.getContext();
   target.addIllegalOp<AtenMmOp>();
   patterns.add<ConvertAtenMmOp>(typeConverter, context);
+  target.addIllegalOp<Aten_ScaledMmV2Op>();
+  patterns.add<ConvertAten_ScaledMmV2Op>(typeConverter, context);
   target.addIllegalOp<AtenFlipOp>();
   patterns.add<ConvertAtenFlipOp>(typeConverter, context);
   target.addIllegalOp<AtenMatmulOp>();

@@ -31,6 +31,67 @@ func.func @torch.aten.mm$basic(%arg0: !torch.vtensor<[?,?],f32>, %arg1: !torch.v
 
 // -----
 
+// CHECK-LABEL: func.func @torch.aten._scaled_mm_v2$tensorwise_fp8
+// CHECK-DAG: %[[LHS:.*]] = torch_c.to_builtin_tensor %{{.*}} : !torch.vtensor<[?,16],f8E4M3FN> -> tensor<?x16xf8E4M3FN>
+// CHECK-DAG: %[[RHS:.*]] = torch_c.to_builtin_tensor %{{.*}} : !torch.vtensor<[16,8],f8E4M3FN> -> tensor<16x8xf8E4M3FN>
+// CHECK-DAG: %[[LHS_SCALE:.*]] = torch_c.to_builtin_tensor %{{.*}} : !torch.vtensor<[1],f32> -> tensor<1xf32>
+// CHECK-DAG: %[[RHS_SCALE:.*]] = torch_c.to_builtin_tensor %{{.*}} : !torch.vtensor<[1],f32> -> tensor<1xf32>
+// CHECK: %[[MATMUL:.*]] = linalg.matmul ins(%[[LHS]], %[[RHS]] : tensor<?x16xf8E4M3FN>, tensor<16x8xf8E4M3FN>) outs(%{{.*}} : tensor<?x?xf32>) -> tensor<?x?xf32>
+// CHECK-NOT: arith.truncf %{{.*}} : f32 to f8E4M3FN
+// CHECK: %[[SCALED_A:.*]] = linalg.generic {{.*}} ins(%[[MATMUL]], %[[LHS_SCALE]] : tensor<?x?xf32>, tensor<1xf32>)
+// CHECK: arith.mulf
+// CHECK-NOT: arith.truncf %{{.*}} : f32 to f8E4M3FN
+// CHECK: %[[SCALED_B:.*]] = linalg.generic {{.*}} ins(%[[SCALED_A]], %[[RHS_SCALE]] : tensor<?x?xf32>, tensor<1xf32>)
+// CHECK: arith.mulf
+// CHECK-NOT: arith.truncf %{{.*}} : f32 to f8E4M3FN
+// CHECK: %[[BF16:.*]] = linalg.generic {{.*}} ins(%[[SCALED_B]] : tensor<?x?xf32>)
+// CHECK: arith.truncf %{{.*}} : f32 to bf16
+func.func @torch.aten._scaled_mm_v2$tensorwise_fp8(
+    %arg0: !torch.vtensor<[?,16],f8E4M3FN>,
+    %arg1: !torch.vtensor<[16,8],f8E4M3FN>,
+    %arg2: !torch.vtensor<[1],f32>,
+    %arg3: !torch.vtensor<[1],f32>) -> !torch.vtensor<[?,8],bf16> {
+  %int0 = torch.constant.int 0
+  %dtype = torch.constant.int 15
+  %false = torch.constant.bool false
+  %none = torch.constant.none
+  %scale_a = torch.prim.ListConstruct %arg2 : (!torch.vtensor<[1],f32>) -> !torch.list<vtensor>
+  %recipe_a = torch.prim.ListConstruct %int0 : (!torch.int) -> !torch.list<int>
+  %swizzle_a = torch.prim.ListConstruct : () -> !torch.list<int>
+  %scale_b = torch.prim.ListConstruct %arg3 : (!torch.vtensor<[1],f32>) -> !torch.list<vtensor>
+  %recipe_b = torch.prim.ListConstruct %int0 : (!torch.int) -> !torch.list<int>
+  %swizzle_b = torch.prim.ListConstruct : () -> !torch.list<int>
+  %contraction_dim = torch.prim.ListConstruct : () -> !torch.list<int>
+  %0 = torch.aten._scaled_mm_v2 %arg0, %arg1, %scale_a, %recipe_a, %swizzle_a, %scale_b, %recipe_b, %swizzle_b, %none, %dtype, %contraction_dim, %false : !torch.vtensor<[?,16],f8E4M3FN>, !torch.vtensor<[16,8],f8E4M3FN>, !torch.list<vtensor>, !torch.list<int>, !torch.list<int>, !torch.list<vtensor>, !torch.list<int>, !torch.list<int>, !torch.none, !torch.int, !torch.list<int>, !torch.bool -> !torch.vtensor<[?,8],bf16>
+  return %0 : !torch.vtensor<[?,8],bf16>
+}
+
+// -----
+
+func.func @torch.aten._scaled_mm_v2$unsupported_recipe(
+    %arg0: !torch.vtensor<[?,16],f8E4M3FN>,
+    %arg1: !torch.vtensor<[16,8],f8E4M3FN>,
+    %arg2: !torch.vtensor<[1],f32>,
+    %arg3: !torch.vtensor<[1],f32>) -> !torch.vtensor<[?,8],bf16> {
+  %int0 = torch.constant.int 0
+  %int1 = torch.constant.int 1
+  %dtype = torch.constant.int 15
+  %false = torch.constant.bool false
+  %none = torch.constant.none
+  %scale_a = torch.prim.ListConstruct %arg2 : (!torch.vtensor<[1],f32>) -> !torch.list<vtensor>
+  %recipe_a = torch.prim.ListConstruct %int1 : (!torch.int) -> !torch.list<int>
+  %swizzle_a = torch.prim.ListConstruct : () -> !torch.list<int>
+  %scale_b = torch.prim.ListConstruct %arg3 : (!torch.vtensor<[1],f32>) -> !torch.list<vtensor>
+  %recipe_b = torch.prim.ListConstruct %int0 : (!torch.int) -> !torch.list<int>
+  %swizzle_b = torch.prim.ListConstruct : () -> !torch.list<int>
+  %contraction_dim = torch.prim.ListConstruct : () -> !torch.list<int>
+  // expected-error @+1 {{failed to legalize operation 'torch.aten._scaled_mm_v2'}}
+  %0 = torch.aten._scaled_mm_v2 %arg0, %arg1, %scale_a, %recipe_a, %swizzle_a, %scale_b, %recipe_b, %swizzle_b, %none, %dtype, %contraction_dim, %false : !torch.vtensor<[?,16],f8E4M3FN>, !torch.vtensor<[16,8],f8E4M3FN>, !torch.list<vtensor>, !torch.list<int>, !torch.list<int>, !torch.list<vtensor>, !torch.list<int>, !torch.list<int>, !torch.none, !torch.int, !torch.list<int>, !torch.bool -> !torch.vtensor<[?,8],bf16>
+  return %0 : !torch.vtensor<[?,8],bf16>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @torch.aten.matmul.2d
 func.func @torch.aten.matmul.2d(%arg0: !torch.vtensor<[8,16],f32>, %arg1: !torch.vtensor<[16,8],f32>) -> !torch.vtensor<[8,8],f32> {
   // CHECK-DAG:  %[[LHS:.+]] = torch_c.to_builtin_tensor %arg0 : !torch.vtensor<[8,16],f32> -> tensor<8x16xf32>
