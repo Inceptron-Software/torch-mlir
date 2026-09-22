@@ -19,6 +19,8 @@ constexpr StringLiteral kMoeFp8SharedTorchOp =
     "torch.inceptron.inceptron_moe_forward_fp8_shared";
 constexpr StringLiteral kMoeW8A16SharedTorchOp =
     "torch.inceptron.inceptron_moe_forward_w8a16_shared";
+constexpr StringLiteral kMoeRouteTorchOp =
+    "torch.inceptron.inceptron_moe_route";
 
 FailureOr<RankedTensorType>
 convertResultType(Torch::OperatorOp op, unsigned index,
@@ -70,6 +72,8 @@ public:
       return lowerScaledMM(op, adaptor, rewriter);
     if (torchName == kAllReduceTorchOp)
       return lowerAllReduce(op, adaptor, rewriter);
+    if (torchName == kMoeRouteTorchOp)
+      return lowerMoeRoute(op, adaptor, rewriter);
     if (torchName == kMoeFp8SharedTorchOp)
       return lowerMoe(op, adaptor, rewriter, "inceptron.moe_forward_fp8_shared",
                       17);
@@ -151,6 +155,49 @@ private:
     return success();
   }
 
+  LogicalResult lowerMoeRoute(Torch::OperatorOp op, OpAdaptor adaptor,
+                              ConversionPatternRewriter &rewriter) const {
+    constexpr StringLiteral operationName = "inceptron.moe_route";
+    if (failed(requireRegisteredOperation(op, operationName)))
+      return failure();
+    if (op.getNumOperands() != 3 || op.getNumResults() != 2)
+      return op.emitOpError()
+             << "expected three operands and two results for MoE routing";
+
+    auto topK = op.getOperand(1).getDefiningOp<Torch::ConstantIntOp>();
+    if (!topK)
+      return op.emitOpError() << "MoE routing top_k must be constant";
+    auto softmax = op.getOperand(2).getDefiningOp<Torch::ConstantBoolOp>();
+    if (!softmax)
+      return op.emitOpError() << "MoE routing softmax flag must be constant";
+
+    FailureOr<RankedTensorType> weightsType =
+        convertResultType(op, 0, *getTypeConverter());
+    FailureOr<RankedTensorType> idsType =
+        convertResultType(op, 1, *getTypeConverter());
+    if (failed(weightsType) || failed(idsType))
+      return failure();
+
+    Value routerLogits = adaptor.getOperands()[0];
+    SmallVector<Value> dimensionSources(idsType->getRank(), routerLogits);
+    Value idsDestination =
+        createDestination(rewriter, op.getLoc(), *idsType, dimensionSources);
+    dimensionSources.resize(weightsType->getRank(), routerLogits);
+    Value weightsDestination = createDestination(
+        rewriter, op.getLoc(), *weightsType, dimensionSources);
+
+    OperationState state(op.getLoc(), operationName);
+    state.addOperands({routerLogits, idsDestination, weightsDestination});
+    state.addTypes({*idsType, *weightsType});
+    state.addAttribute("top_k", topK.getValueAttr());
+    state.addAttribute("softmax", softmax.getValueAttr());
+    state.addAttribute("resultSegmentSizes",
+                       rewriter.getDenseI32ArrayAttr({2, 0}));
+    Operation *route = rewriter.create(state);
+    rewriter.replaceOp(op, {route->getResult(1), route->getResult(0)});
+    return success();
+  }
+
   LogicalResult lowerMoe(Torch::OperatorOp op, OpAdaptor adaptor,
                          ConversionPatternRewriter &rewriter,
                          StringRef operationName,
@@ -203,6 +250,19 @@ public:
   }
 };
 
+class ConvertTorchConstantBoolPattern
+    : public OpConversionPattern<Torch::ConstantBoolOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(Torch::ConstantBoolOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, op.getValueAttr());
+    return success();
+  }
+};
+
 bool isIgnoredInceptronNone(Torch::ConstantNoneOp op) {
   return llvm::all_of(op->getUses(), [](OpOperand &use) {
     auto operatorOp = dyn_cast<Torch::OperatorOp>(use.getOwner());
@@ -220,8 +280,9 @@ bool isIgnoredInceptronNone(Torch::ConstantNoneOp op) {
 void mlir::torch::TorchConversion::populateInceptronBackendTypeConversion(
     TypeConverter &typeConverter, RewritePatternSet &patterns,
     ConversionTarget &target) {
-  patterns.add<ConvertInceptronOperatorPattern, ConvertTorchConstantIntPattern>(
-      typeConverter, patterns.getContext());
+  patterns.add<ConvertInceptronOperatorPattern, ConvertTorchConstantIntPattern,
+               ConvertTorchConstantBoolPattern>(typeConverter,
+                                                patterns.getContext());
   target.addDynamicallyLegalOp<Torch::ConstantNoneOp>(isIgnoredInceptronNone);
 }
 
