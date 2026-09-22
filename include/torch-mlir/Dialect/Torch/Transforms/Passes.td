@@ -148,6 +148,8 @@ def ReduceOpVariants : Pass<"torch-reduce-op-variants", "func::FuncOp"> {
   let options = [
     Option<"extraLibrary", "extra-library", "std::string", /*default=*/"",
            "MLIR module for verifying custom op value semantics">,
+    ListOption<"backendLegalOps", "backend-legal-ops", "std::string",
+               "List of ops to be considered legal for the backend, such as 'aten.foo'.">,
   ];
   let description = [{
     Replaces ops with other ops to reduce the number of variants that
@@ -159,17 +161,6 @@ def ReduceOpVariants : Pass<"torch-reduce-op-variants", "func::FuncOp"> {
       mutable semantics (e.g. `add.out`) to their value-semantic equivalent.
     - Convert operations that involve a scalar promotion to the tensor
       variant plus a scalar promotion op.
-  }];
-}
-
-def LowerInceptronOps : Pass<"torch-lower-inceptron-ops", "ModuleOp"> {
-  let summary = "Lower Inceptron custom torch.operators to func.call";
-  let constructor = "mlir::torch::Torch::createLowerInceptronOpsPass()";
-  let description = [{
-    Matches torch.operator \"netcrush_ext.netcrush_scaled_mm\" and replaces it
-    with a call to an external function @netcrush_scaled_mm, inserting the
-    declaration on-demand. This is useful when delegating the operation to an
-    out-of-tree runtime without further decomposition in Torch dialect.
   }];
 }
 

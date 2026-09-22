@@ -7,6 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Inceptron/InceptronExtension.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -224,6 +226,7 @@ struct FinalizingBackendTypeConversionPass
     setupFinalization<ToBuiltinTensorOp, FromBuiltinTensorOp, FromI1Op, ToI1Op,
                       FromI64Op, ToI64Op, FromF64Op, ToF64Op, I64ToGeneratorOp,
                       GeneratorToI64Op>(target, patterns, typeConverter);
+    populateInceptronBackendTypeConversion(typeConverter, patterns, target);
 
     // If all result types are legal, and all block arguments are legal, then
     // all types in the program are legal.
