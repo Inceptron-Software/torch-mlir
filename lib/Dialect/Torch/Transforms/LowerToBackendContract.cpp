@@ -593,12 +593,18 @@ static void markDecomposedOpsAsIllegal(MLIRContext *context,
   target.addIllegalOp<AtenAsStridedOp>();
 
   for (auto &opName : backendLegalOpsSet) {
-    target.addLegalOp(
-        OperationName(kTorchOpPrefix + opName.first().str(), context));
+    StringRef name = opName.first();
+    std::string qualifiedName = name.starts_with(kTorchOpPrefix)
+                                    ? name.str()
+                                    : kTorchOpPrefix + name.str();
+    target.addLegalOp(OperationName(qualifiedName, context));
   }
   target.addDynamicallyLegalOp<OperatorOp>(
       [backendLegalOpsSet](OperatorOp opOp) {
         auto opName = cast<StringAttr>(opOp->getAttr("name")).getValue();
-        return backendLegalOpsSet.contains(opName);
+        return backendLegalOpsSet.contains(opName) ||
+               (opName.starts_with(kTorchOpPrefix) &&
+                backendLegalOpsSet.contains(
+                    opName.drop_front(StringRef(kTorchOpPrefix).size())));
       });
 }

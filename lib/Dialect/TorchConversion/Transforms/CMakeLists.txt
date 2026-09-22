@@ -22,6 +22,7 @@ endif()
 add_mlir_library(TorchMLIRTorchConversionPasses
   BackendTypeConversion.cpp
   BackendTypeConversionPasses.cpp
+  Inceptron/InceptronExtension.cpp
   Passes.cpp
   ConvertCustomQuantOp.cpp
   UnpackQuantTensor.cpp

@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Inceptron/InceptronExtension.h"
 #include "PassDetail.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -87,6 +88,7 @@ class VerifyLinalgOnTensorsBackendContractPass
     target.addDynamicallyLegalDialect<scf::SCFDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<ml_program::MLProgramDialect>(
         opHasLegalTypes);
+    configureInceptronLinalgBackendContract(target, converter);
 
     // ConstantOp is used for tensors and for scalars.
     target.addDynamicallyLegalOp<arith::ConstantOp>(opHasLegalTypes);

@@ -70,11 +70,9 @@ void mlir::torch::Torch::createTorchScriptModuleToTorchBackendPipeline(
 
 void mlir::torch::Torch::createTorchDynamoExportToTorchBackendPipeline(
     OpPassManager &pm, const TorchLoweringPipelineOptions &options) {
-  // Lower custom scaled mm operator to an external call before backend
-  // contract conversion so later passes only see a standard func.call.
-  pm.addPass(createLowerInceptronOpsPass());
   pm.addNestedPass<func::FuncOp>(
-      createReduceOpVariantsPass(options.extraLibrary));
+      createReduceOpVariantsPass(options.extraLibrary,
+                                 options.backendLegalOps));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   if (options.decompose) {
     pm.addNestedPass<func::FuncOp>(
@@ -165,7 +163,8 @@ void mlir::torch::Torch::createTorchSimplificationPipeline(
   pm.addNestedPass<func::FuncOp>(createRecomposeComplexOpsPass());
   // Reduce variants of ops to a smaller set of primitives.
   pm.addNestedPass<func::FuncOp>(
-      createReduceOpVariantsPass(options.extraLibrary));
+      createReduceOpVariantsPass(options.extraLibrary,
+                                 options.backendLegalOps));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   // Remove dead global slots.
   pm.addPass(createSymbolDCEPass());
