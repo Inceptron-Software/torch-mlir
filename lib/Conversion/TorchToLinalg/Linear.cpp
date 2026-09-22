@@ -217,15 +217,15 @@ getSingleTensorListElement(Value listValue, const TypeConverter *typeConverter,
   Value element = list.getElements().front();
   Type convertedType = typeConverter->convertType(element.getType());
   if (!convertedType) {
-    (void)rewriter.notifyMatchFailure(
-        op, Twine("cannot convert ") + description + " tensor type");
+    (void)rewriter.notifyMatchFailure(op, Twine("cannot convert ") +
+                                              description + " tensor type");
     return failure();
   }
   Value converted = typeConverter->materializeTargetConversion(
       rewriter, loc, convertedType, element);
   if (!converted) {
-    (void)rewriter.notifyMatchFailure(
-        op, Twine("cannot materialize ") + description + " tensor");
+    (void)rewriter.notifyMatchFailure(op, Twine("cannot materialize ") +
+                                              description + " tensor");
     return failure();
   }
   return converted;
@@ -237,8 +237,7 @@ static bool matchesConstantIntList(Value value, ArrayRef<int64_t> expected) {
          observed == expected;
 }
 
-class ConvertAten_ScaledMmV2Op
-    : public OpConversionPattern<Aten_ScaledMmV2Op> {
+class ConvertAten_ScaledMmV2Op : public OpConversionPattern<Aten_ScaledMmV2Op> {
 public:
   using OpConversionPattern::OpConversionPattern;
 
@@ -250,8 +249,8 @@ public:
     Value rhs = adaptor.getMat2();
     auto lhsType = dyn_cast<RankedTensorType>(lhs.getType());
     auto rhsType = dyn_cast<RankedTensorType>(rhs.getType());
-    auto resultType = dyn_cast<TensorType>(
-        getTypeConverter()->convertType(op.getType()));
+    auto resultType =
+        dyn_cast<TensorType>(getTypeConverter()->convertType(op.getType()));
     if (!lhsType || !rhsType || !resultType)
       return rewriter.notifyMatchFailure(op, "requires ranked tensor types");
     if (lhsType.getRank() != 2 || rhsType.getRank() != 2)
@@ -277,22 +276,20 @@ public:
 
     int64_t outputDtype;
     if (!matchPattern(op.getOutDtype(), m_TorchConstantInt(&outputDtype)) ||
-        outputDtype != static_cast<int64_t>(
-                           torch_upstream::ScalarType::BFloat16))
+        outputDtype !=
+            static_cast<int64_t>(torch_upstream::ScalarType::BFloat16))
       return rewriter.notifyMatchFailure(op, "requires BF16 output dtype");
     bool useFastAccum;
     if (!matchPattern(op.getUseFastAccum(),
                       m_TorchConstantBool(&useFastAccum)) ||
         useFastAccum)
-      return rewriter.notifyMatchFailure(
-          op, "does not support fast accumulation");
+      return rewriter.notifyMatchFailure(op,
+                                         "does not support fast accumulation");
 
     FailureOr<Value> lhsScale = getSingleTensorListElement(
-        op.getScaleA(), getTypeConverter(), loc, rewriter, op,
-        "left scale");
+        op.getScaleA(), getTypeConverter(), loc, rewriter, op, "left scale");
     FailureOr<Value> rhsScale = getSingleTensorListElement(
-        op.getScaleB(), getTypeConverter(), loc, rewriter, op,
-        "right scale");
+        op.getScaleB(), getTypeConverter(), loc, rewriter, op, "right scale");
     if (failed(lhsScale) || failed(rhsScale))
       return failure();
     for (Value scale : {*lhsScale, *rhsScale}) {
@@ -312,8 +309,8 @@ public:
           rewriter, loc, arith::CmpIPredicate::eq, lhsDim1, rhsDim0);
       cf::AssertOp::create(
           rewriter, loc, contractingDimEqual,
-          rewriter.getStringAttr(
-              "mismatching contracting dimension for torch.aten._scaled_mm_v2"));
+          rewriter.getStringAttr("mismatching contracting dimension for "
+                                 "torch.aten._scaled_mm_v2"));
     }
 
     Type accumulatorType = rewriter.getF32Type();
@@ -321,7 +318,7 @@ public:
         rewriter, loc, ValueRange{lhsDim0, rhsDim1}, accumulatorType);
     Value accumulated =
         linalg::MatmulOp::create(rewriter, loc, zeroFill.getType(),
-                                ValueRange{lhs, rhs}, zeroFill)
+                                 ValueRange{lhs, rhs}, zeroFill)
             .getResult(0);
     auto multiply = [&](Value value, Value scale) {
       return torch_to_linalg::createElementwiseLinalgGeneric(
