@@ -76,7 +76,7 @@ public:
       return lowerMoeRoute(op, adaptor, rewriter);
     if (torchName == kMoeFp8SharedTorchOp)
       return lowerMoe(op, adaptor, rewriter, "inceptron.moe_forward_fp8_shared",
-                      17);
+                      18);
     if (torchName == kMoeW8A16SharedTorchOp)
       return lowerMoe(op, adaptor, rewriter,
                       "inceptron.moe_forward_w8a16_shared", 20);
