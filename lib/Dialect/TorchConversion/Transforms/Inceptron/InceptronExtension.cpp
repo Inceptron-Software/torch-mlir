@@ -15,10 +15,6 @@ constexpr StringLiteral kScaledMMTorchOp =
     "torch.inceptron.inceptron_scaled_mm";
 constexpr StringLiteral kAllReduceTorchOp =
     "torch.inceptron.inceptron_all_reduce";
-constexpr StringLiteral kMoeFp8SharedTorchOp =
-    "torch.inceptron.inceptron_moe_forward_fp8_shared";
-constexpr StringLiteral kMoeW8A16SharedTorchOp =
-    "torch.inceptron.inceptron_moe_forward_w8a16_shared";
 constexpr StringLiteral kMoeRouteTorchOp =
     "torch.inceptron.inceptron_moe_route";
 
@@ -74,12 +70,11 @@ public:
       return lowerAllReduce(op, adaptor, rewriter);
     if (torchName == kMoeRouteTorchOp)
       return lowerMoeRoute(op, adaptor, rewriter);
-    if (torchName == kMoeFp8SharedTorchOp)
-      return lowerMoe(op, adaptor, rewriter, "inceptron.moe_forward_fp8_shared",
-                      18);
-    if (torchName == kMoeW8A16SharedTorchOp)
-      return lowerMoe(op, adaptor, rewriter,
-                      "inceptron.moe_forward_w8a16_shared", 20);
+    if (torchName == "torch.inceptron.inceptron_moe_permute" ||
+        torchName == "torch.inceptron.inceptron_moe_w8a8_grouped_mm" ||
+        torchName == "torch.inceptron.inceptron_moe_w8a16_grouped_mm" ||
+        torchName == "torch.inceptron.inceptron_moe_unpermute")
+      return lowerMoeStage(op, adaptor, rewriter);
 
     return op.emitOpError()
            << "unsupported Inceptron custom operator '" << torchName << "'";
@@ -198,39 +193,85 @@ private:
     return success();
   }
 
-  LogicalResult lowerMoe(Torch::OperatorOp op, OpAdaptor adaptor,
-                         ConversionPatternRewriter &rewriter,
-                         StringRef operationName,
-                         unsigned expectedOperandCount) const {
+  LogicalResult lowerMoeStage(Torch::OperatorOp op, OpAdaptor adaptor,
+                              ConversionPatternRewriter &rewriter) const {
+    std::string operationName =
+        ("inceptron." + op.getName().drop_front(kInceptronTorchPrefix.size()))
+            .str();
     if (failed(requireRegisteredOperation(op, operationName)))
       return failure();
-    if (op.getNumOperands() != expectedOperandCount || op.getNumResults() != 2)
-      return op.emitOpError()
-             << "unexpected operand or result count for " << operationName;
-    if (!isa<Torch::NoneType>(op.getOperand(3).getType()))
-      return op.emitOpError()
-             << "MoE input_ids must be None for the supported variants";
-
-    FailureOr<RankedTensorType> sharedType =
-        convertResultType(op, 0, *getTypeConverter());
-    FailureOr<RankedTensorType> fusedType =
-        convertResultType(op, 1, *getTypeConverter());
-    if (failed(sharedType) || failed(fusedType))
-      return failure();
-
-    ValueRange operands = adaptor.getOperands();
-    SmallVector<Value> loweredOperands;
-    loweredOperands.reserve(operands.size() - 1);
-    loweredOperands.append(operands.begin(), operands.begin() + 3);
-    loweredOperands.append(operands.begin() + 4, operands.end());
-
+    const bool permute = operationName == "inceptron.moe_permute";
+    const bool w8a16 = operationName == "inceptron.moe_w8a16_grouped_mm";
+    const bool unpermute = operationName == "inceptron.moe_unpermute";
+    const unsigned tensorCount = permute ? 3 : (w8a16 || unpermute ? 4 : 5);
+    const ValueRange operands = adaptor.getOperands();
     OperationState state(op.getLoc(), operationName);
-    state.addOperands(loweredOperands);
-    state.addTypes({*sharedType, *fusedType});
-    Operation *inputIds = op.getOperand(3).getDefiningOp();
+    state.addOperands(operands.take_front(tensorCount));
+    auto addIntAttribute = [&state, &op](unsigned index,
+                                         StringRef name) -> LogicalResult {
+      auto constant =
+          op.getOperand(index).getDefiningOp<Torch::ConstantIntOp>();
+      if (!constant)
+        return op.emitOpError() << name << " must be constant";
+      state.addAttribute(name, constant.getValueAttr());
+      return success();
+    };
+    if (permute && failed(addIntAttribute(4, "row_alignment")))
+      return failure();
+    if (w8a16 && (failed(addIntAttribute(4, "block_n")) ||
+                  failed(addIntAttribute(5, "block_k"))))
+      return failure();
+    if (permute || unpermute) {
+      auto flag =
+          op.getOperand(permute ? 5 : 4).getDefiningOp<Torch::ConstantBoolOp>();
+      if (!flag)
+        return op.emitOpError() << "pre_expert must be constant";
+      state.addAttribute("pre_expert", flag.getValueAttr());
+    }
+    for (unsigned result = 0; result < op.getNumResults(); ++result) {
+      auto type = convertResultType(op, result, *getTypeConverter());
+      if (failed(type))
+        return failure();
+      Value destination;
+      if (permute && result == 0) {
+        auto experts = op.getOperand(3).getDefiningOp<Torch::ConstantIntOp>();
+        auto alignment = op.getOperand(4).getDefiningOp<Torch::ConstantIntOp>();
+        if (!experts)
+          return op.emitOpError() << "num_experts must be constant";
+        Value tokens =
+            rewriter.create<tensor::DimOp>(op.getLoc(), operands[0], 0);
+        Value topK =
+            rewriter.create<tensor::DimOp>(op.getLoc(), operands[1], 1);
+        Value rows = rewriter.create<arith::MulIOp>(op.getLoc(), tokens, topK);
+        Value tail = rewriter.create<arith::ConstantIndexOp>(
+            op.getLoc(), experts.getValue() * (alignment.getValue() - 1));
+        rows = rewriter.create<arith::AddIOp>(op.getLoc(), rows, tail);
+        SmallVector<Value> dynamicDimensions;
+        if (type->isDynamicDim(0))
+          dynamicDimensions.push_back(rows);
+        if (type->isDynamicDim(1))
+          dynamicDimensions.push_back(
+              rewriter.create<tensor::DimOp>(op.getLoc(), operands[0], 1));
+        destination = rewriter.create<tensor::EmptyOp>(
+            op.getLoc(), type->getShape(), type->getElementType(),
+            dynamicDimensions);
+      } else {
+        SmallVector<Value> sources;
+        if (permute)
+          sources.assign(type->getRank(), operands[1]);
+        else if (unpermute)
+          sources = {operands[2], operands[0]};
+        else
+          sources = {operands[0], operands[1]};
+        destination = createDestination(rewriter, op.getLoc(), *type, sources);
+      }
+      state.addOperands(destination);
+      state.addTypes(*type);
+    }
+    state.addAttribute("resultSegmentSizes",
+                       rewriter.getDenseI32ArrayAttr(
+                           {static_cast<int32_t>(op.getNumResults()), 0}));
     rewriter.replaceOp(op, rewriter.create(state));
-    if (inputIds && inputIds->use_empty())
-      rewriter.eraseOp(inputIds);
     return success();
   }
 };
@@ -270,9 +311,7 @@ bool isIgnoredInceptronNone(Torch::ConstantNoneOp op) {
       return false;
     StringRef name = operatorOp.getName();
     unsigned operand = use.getOperandNumber();
-    return (name == kScaledMMTorchOp && operand == 5) ||
-           ((name == kMoeFp8SharedTorchOp || name == kMoeW8A16SharedTorchOp) &&
-            operand == 3);
+    return name == kScaledMMTorchOp && operand == 5;
   });
 }
 } // namespace
