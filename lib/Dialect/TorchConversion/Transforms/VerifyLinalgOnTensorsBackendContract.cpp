@@ -7,8 +7,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Inceptron/InceptronExtension.h"
-
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -24,6 +22,7 @@
 #include "torch-mlir-dialects/Dialect/TMTensor/IR/TMTensorDialect.h"
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
+#include "torch-mlir/Dialect/TorchConversion/Transforms/TorchBackendConversionInterface.h"
 
 #include "mlir/IR/BuiltinOps.h"
 
@@ -92,7 +91,9 @@ class VerifyLinalgOnTensorsBackendContractPass
     target.addDynamicallyLegalDialect<scf::SCFDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<ml_program::MLProgramDialect>(
         opHasLegalTypes);
-    configureInceptronLinalgBackendContract(target, converter);
+    DialectInterfaceCollection<TorchBackendConversionInterface> backends(context);
+    for (const auto &backend : backends)
+      backend.configureLinalgBackendContract(target, converter);
 
     // ConstantOp is used for tensors and for scalars.
     target.addDynamicallyLegalOp<arith::ConstantOp>(opHasLegalTypes);

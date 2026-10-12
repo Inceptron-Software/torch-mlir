@@ -7,8 +7,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "Inceptron/InceptronExtension.h"
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -20,6 +18,7 @@
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/BackendTypeConversion.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/Passes.h"
+#include "torch-mlir/Dialect/TorchConversion/Transforms/TorchBackendConversionInterface.h"
 
 using namespace mlir;
 using namespace mlir::torch;
@@ -226,7 +225,9 @@ struct FinalizingBackendTypeConversionPass
     setupFinalization<ToBuiltinTensorOp, FromBuiltinTensorOp, FromI1Op, ToI1Op,
                       FromI64Op, ToI64Op, FromF64Op, ToF64Op, I64ToGeneratorOp,
                       GeneratorToI64Op>(target, patterns, typeConverter);
-    populateInceptronBackendTypeConversion(typeConverter, patterns, target);
+    DialectInterfaceCollection<TorchBackendConversionInterface> backends(context);
+    for (const auto &backend : backends)
+      backend.populateTypeConversion(typeConverter, patterns, target);
 
     // If all result types are legal, and all block arguments are legal, then
     // all types in the program are legal.
