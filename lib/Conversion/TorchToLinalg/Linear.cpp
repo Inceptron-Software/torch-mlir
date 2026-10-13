@@ -237,6 +237,114 @@ static bool matchesConstantIntList(Value value, ArrayRef<int64_t> expected) {
          observed == expected;
 }
 
+// Block scales belong to the K reduction, not to the final matrix product.
+// Keep FP8 inputs and FP32 partial contractions explicit. The 128 split is the
+// quantization group, not a selected execution tile or serving schedule.
+static FailureOr<Value>
+lowerBlockScaledMm(Aten_ScaledMmV2Op op, Value lhs, Value rhs, Value lhsScale,
+                   Value rhsScale, ConversionPatternRewriter &rewriter) {
+  auto lhsType = cast<RankedTensorType>(lhs.getType());
+  auto rhsType = cast<RankedTensorType>(rhs.getType());
+  auto lhsScaleType = dyn_cast<RankedTensorType>(lhsScale.getType());
+  auto rhsScaleType = dyn_cast<RankedTensorType>(rhsScale.getType());
+  constexpr int64_t blockSize = 128;
+  int64_t k = lhsType.getDimSize(1), n = rhsType.getDimSize(1);
+  if (ShapedType::isDynamic(k) || ShapedType::isDynamic(n) || k <= 0 ||
+      n <= 0 || k % blockSize || n % blockSize || rhsType.getDimSize(0) != k) {
+    return rewriter.notifyMatchFailure(
+        op, "block scaling requires matching static K and N divisible by 128");
+  }
+  int64_t groups = k / blockSize;
+  int64_t paddedGroups = ((groups + 3) / 4) * 4;
+  if (!lhsScaleType || !rhsScaleType || lhsScaleType.getRank() != 2 ||
+      rhsScaleType.getRank() != 2 || !lhsScaleType.getElementType().isF32() ||
+      !rhsScaleType.getElementType().isF32() ||
+      lhsScaleType.getDimSize(1) != groups ||
+      rhsScaleType.getDimSize(0) != paddedGroups ||
+      rhsScaleType.getDimSize(1) != n / blockSize ||
+      (!ShapedType::isDynamic(lhsType.getDimSize(0)) &&
+       !ShapedType::isDynamic(lhsScaleType.getDimSize(0)) &&
+       lhsType.getDimSize(0) != lhsScaleType.getDimSize(0))) {
+    return rewriter.notifyMatchFailure(
+        op, "block scales require FP32 [M,K/128] and [ceil(K/128,4),N/128]");
+  }
+  Location loc = op.getLoc();
+  Value rows = tensor::DimOp::create(rewriter, loc, lhs, 0);
+  if (!isAssumingStrictSymbolicShapes(rewriter)) {
+    Value scaleRows = tensor::DimOp::create(rewriter, loc, lhsScale, 0);
+    Value equal = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                        rows, scaleRows);
+    cf::AssertOp::create(
+        rewriter, loc, equal,
+        "mismatching activation scale rows for block scaled mm");
+  }
+  auto splitLhsType = RankedTensorType::get(
+      {lhsType.getDimSize(0), groups, blockSize}, lhsType.getElementType());
+  Value splitLhs = tensor::ExpandShapeOp::create(
+      rewriter, loc, splitLhsType, lhs,
+      ArrayRef<ReassociationIndices>{{0}, {1, 2}});
+  splitLhs = transposeValue(loc, splitLhs, {1, 0, 2}, rewriter);
+  auto splitRhsType =
+      RankedTensorType::get({groups, blockSize, n}, rhsType.getElementType());
+  Value splitRhs = tensor::ExpandShapeOp::create(
+      rewriter, loc, splitRhsType, rhs,
+      ArrayRef<ReassociationIndices>{{0, 1}, {2}});
+  Value groupCount = arith::ConstantIndexOp::create(rewriter, loc, groups);
+  Value columns = arith::ConstantIndexOp::create(rewriter, loc, n);
+  Value partialInit =
+      createZeroInitTensor(rewriter, loc, ValueRange{groupCount, rows, columns},
+                           rewriter.getF32Type());
+  Value partials =
+      linalg::BatchMatmulOp::create(rewriter, loc, partialInit.getType(),
+                                    ValueRange{splitLhs, splitRhs}, partialInit)
+          .getResult(0);
+
+  // Remove ABI padding before linalg indexing: its operand extents must agree
+  // with the actual group loop range, even when padding is never accessed.
+  SmallVector<OpFoldResult> scaleOffsets{rewriter.getIndexAttr(0),
+                                         rewriter.getIndexAttr(0)};
+  SmallVector<OpFoldResult> scaleSizes{rewriter.getIndexAttr(groups),
+                                       rewriter.getIndexAttr(n / blockSize)};
+  SmallVector<OpFoldResult> scaleStrides{rewriter.getIndexAttr(1),
+                                         rewriter.getIndexAttr(1)};
+  rhsScale = tensor::ExtractSliceOp::create(
+      rewriter, loc, rhsScale, scaleOffsets, scaleSizes, scaleStrides);
+  auto g = rewriter.getAffineDimExpr(0);
+  auto m = rewriter.getAffineDimExpr(1);
+  auto j = rewriter.getAffineDimExpr(2);
+  auto maps = AffineMap::inferFromExprList(
+      ArrayRef<SmallVector<AffineExpr, 4>>{
+          {g, m, j}, {m, g}, {g, j.floorDiv(blockSize)}, {g, m, j}},
+      rewriter.getContext());
+  Value scaled =
+      linalg::GenericOp::create(
+          rewriter, loc, partialInit.getType(),
+          ValueRange{partials, lhsScale, rhsScale}, partialInit, maps,
+          SmallVector<utils::IteratorType>(3, utils::IteratorType::parallel),
+          [&](OpBuilder &b, Location bodyLoc, ValueRange args) {
+            Value scale = arith::MulFOp::create(b, bodyLoc, args[1], args[2]);
+            Value product = arith::MulFOp::create(b, bodyLoc, args[0], scale);
+            linalg::YieldOp::create(b, bodyLoc, product);
+          })
+          .getResult(0);
+  Value resultInit = createZeroInitTensor(
+      rewriter, loc, ValueRange{rows, columns}, rewriter.getF32Type());
+  auto reductionMaps = AffineMap::inferFromExprList(
+      ArrayRef<SmallVector<AffineExpr, 4>>{{m, g, j}, {g, j}},
+      rewriter.getContext());
+  return linalg::GenericOp::create(
+             rewriter, loc, resultInit.getType(), ValueRange{scaled},
+             resultInit, reductionMaps,
+             ArrayRef<utils::IteratorType>{utils::IteratorType::parallel,
+                                           utils::IteratorType::reduction,
+                                           utils::IteratorType::parallel},
+             [&](OpBuilder &b, Location bodyLoc, ValueRange args) {
+               Value sum = arith::AddFOp::create(b, bodyLoc, args[0], args[1]);
+               linalg::YieldOp::create(b, bodyLoc, sum);
+             })
+      .getResult(0);
+}
+
 class ConvertAten_ScaledMmV2Op : public OpConversionPattern<Aten_ScaledMmV2Op> {
 public:
   using OpConversionPattern::OpConversionPattern;
@@ -261,10 +369,13 @@ public:
     if (!isa<BFloat16Type>(resultType.getElementType()))
       return rewriter.notifyMatchFailure(op, "requires a BF16 result");
 
-    if (!matchesConstantIntList(op.getRecipeA(), {0}) ||
-        !matchesConstantIntList(op.getRecipeB(), {0}))
+    bool tensorwise = matchesConstantIntList(op.getRecipeA(), {0}) &&
+                      matchesConstantIntList(op.getRecipeB(), {0});
+    bool blockwise = matchesConstantIntList(op.getRecipeA(), {4}) &&
+                     matchesConstantIntList(op.getRecipeB(), {5});
+    if (!tensorwise && !blockwise)
       return rewriter.notifyMatchFailure(
-          op, "supports only tensor-wise scaling recipes");
+          op, "supports tensor-wise or 1x128/128x128 scaling recipes");
     if (!matchesConstantIntList(op.getSwizzleA(), {}) ||
         !matchesConstantIntList(op.getSwizzleB(), {}))
       return rewriter.notifyMatchFailure(op, "does not support swizzles");
@@ -292,6 +403,16 @@ public:
         op.getScaleB(), getTypeConverter(), loc, rewriter, op, "right scale");
     if (failed(lhsScale) || failed(rhsScale))
       return failure();
+    if (blockwise) {
+      FailureOr<Value> accumulated =
+          lowerBlockScaledMm(op, lhs, rhs, *lhsScale, *rhsScale, rewriter);
+      if (failed(accumulated))
+        return failure();
+      Value converted = torch_to_linalg::convertTensorToElementType(
+          rewriter, loc, *accumulated, resultType.getElementType());
+      rewriter.replaceOpWithNewOp<tensor::CastOp>(op, resultType, converted);
+      return success();
+    }
     for (Value scale : {*lhsScale, *rhsScale}) {
       auto scaleType = dyn_cast<RankedTensorType>(scale.getType());
       if (!scaleType || scaleType.getRank() != 1 ||
