@@ -284,6 +284,7 @@ PY_BUILTIN_TO_TORCH_OP = {
     "mod": torch.ops.aten.fmod,
     "eq": torch.ops.aten.eq,
     "floordiv": torch.ops.aten.floordiv,
+    "neg": torch.ops.aten.neg,
 }
 
 # torch with cuda has a __version__ that looks like  "2.1.0+cu113",
@@ -1641,9 +1642,12 @@ class GraphNodeImporter:
         # parse builtin operations like add, sub, mul, etc. because dynamo captures these
         # operations on symbolic arguments as regular python expressions rather than as torch ops
         if is_builtin_function_or_method(target):
+            arg_values = [
+                arg.meta["val"] if isinstance(arg, Node) else arg for arg in node.args
+            ]
             arg_types = [
-                (arg.meta["val"].node.pytype if isinstance(arg, Node) else type(arg))
-                for arg in node.args
+                value.node.pytype if is_symbolic(value) else type(value)
+                for value in arg_values
             ]
             is_int = [item is int for item in arg_types]
             if all(is_int):

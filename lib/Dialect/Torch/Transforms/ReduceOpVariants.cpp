@@ -14,6 +14,7 @@
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 #include "torch-mlir/Dialect/Torch/Transforms/Passes.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSet.h"
 
 using namespace mlir;
 using namespace mlir::torch;
@@ -72,20 +73,34 @@ operatorOpHasValueSemantics(OperatorOp opOp,
   return bool(libFunc);
 }
 
+static bool isBackendLegalOperator(OperatorOp opOp,
+                                   const llvm::StringSet<> &backendLegalOps) {
+  StringRef opName = opOp.getName();
+  return backendLegalOps.contains(opName) ||
+         (opName.starts_with(kTorchOpPrefix) &&
+          backendLegalOps.contains(
+              opName.drop_front(StringRef(kTorchOpPrefix).size())));
+}
+
 namespace {
 // Convert value semantic ops operating on mutable arrays to instead operate on
 // immutable tensors.
 class ConvertHasValueSemanticsOpsToValueTensors : public RewritePattern {
 public:
   ConvertHasValueSemanticsOpsToValueTensors(
-      MLIRContext *context, const std::optional<SymbolTable> &extraLibrary)
+      MLIRContext *context, const std::optional<SymbolTable> &extraLibrary,
+      const llvm::StringSet<> &backendLegalOps)
       : RewritePattern(MatchAnyOpTypeTag(), /*benefit=*/1, context) {
     this->extraLibrary = extraLibrary;
+    for (const auto &opName : backendLegalOps)
+      this->backendLegalOps.insert(opName.getKey());
   }
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
     if (isa<OperatorOp>(op)) {
-      if (!operatorOpHasValueSemantics(cast<OperatorOp>(op), extraLibrary)) {
+      auto operatorOp = cast<OperatorOp>(op);
+      if (!operatorOpHasValueSemantics(operatorOp, extraLibrary) &&
+          !isBackendLegalOperator(operatorOp, backendLegalOps)) {
         return rewriter.notifyMatchFailure(op, "does not have value semantics");
       }
     } else if (!op->hasTrait<Torch::OpTrait::HasValueSemantics>()) {
@@ -191,6 +206,7 @@ public:
 
 private:
   std::optional<SymbolTable> extraLibrary;
+  llvm::StringSet<> backendLegalOps;
 };
 } // namespace
 
@@ -426,6 +442,8 @@ struct ReduceOpVariantsPass
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
+    llvm::StringSet<> backendLegalOpsSet;
+    backendLegalOpsSet.insert(backendLegalOps.begin(), backendLegalOps.end());
     OwningOpRef<ModuleOp> extraLibraryModule =
         ModuleOp::create(UnknownLoc::get(context));
     std::optional<SymbolTable> extraLibraryModuleSymTable = std::nullopt;
@@ -440,7 +458,7 @@ struct ReduceOpVariantsPass
           SymbolTable(extraLibraryModule->getOperation());
     }
     patterns.add<ConvertHasValueSemanticsOpsToValueTensors>(
-        context, extraLibraryModuleSymTable);
+        context, extraLibraryModuleSymTable, backendLegalOpsSet);
     patterns.add<ReduceTrailingUnderscoreInplaceVariant>(context);
     patterns.add(reduceNonValueTensorLiteralOpToValueTensorLiteralOp);
     patterns.add<ReduceNonValueSemanticOps>(context);
@@ -457,7 +475,8 @@ struct ReduceOpVariantsPass
     target.addIllegalOp<AtenBernoulli_FloatOp>();
     target.addIllegalOp<AtenArangeStartOutOp>();
     target.markUnknownOpDynamicallyLegal([&extraLibraryModuleSymTable,
-                                          &specializedNames](Operation *op) {
+                                          &specializedNames,
+                                          &backendLegalOpsSet](Operation *op) {
       if (isa<OperatorOp>(op)) {
         if (specializedNames.contains(cast<OperatorOp>(op).getNameAttr())) {
           return false;
@@ -465,8 +484,10 @@ struct ReduceOpVariantsPass
       }
       if (op->hasTrait<Torch::OpTrait::HasValueSemantics>() ||
           (isa<OperatorOp>(op) &&
-           operatorOpHasValueSemantics(cast<OperatorOp>(op),
-                                       extraLibraryModuleSymTable))) {
+           (operatorOpHasValueSemantics(cast<OperatorOp>(op),
+                                        extraLibraryModuleSymTable) ||
+            isBackendLegalOperator(cast<OperatorOp>(op),
+                                   backendLegalOpsSet)))) {
         auto hasValueSemantics = [](Type t) {
           // TODO: Make this an allowlist based on a closed torch dialect
           // type system.
@@ -496,9 +517,12 @@ struct ReduceOpVariantsPass
 } // namespace
 
 std::unique_ptr<OperationPass<func::FuncOp>>
-createReduceOpVariantsPass(StringRef extraLibrary) {
+createReduceOpVariantsPass(StringRef extraLibrary,
+                           ArrayRef<std::string> backendLegalOps) {
   ReduceOpVariantsOptions options;
   options.extraLibrary = extraLibrary.str();
+  options.backendLegalOps.append(backendLegalOps.begin(),
+                                 backendLegalOps.end());
   return std::make_unique<ReduceOpVariantsPass>(options);
 }
 
