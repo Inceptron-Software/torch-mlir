@@ -225,7 +225,8 @@ struct FinalizingBackendTypeConversionPass
     setupFinalization<ToBuiltinTensorOp, FromBuiltinTensorOp, FromI1Op, ToI1Op,
                       FromI64Op, ToI64Op, FromF64Op, ToF64Op, I64ToGeneratorOp,
                       GeneratorToI64Op>(target, patterns, typeConverter);
-    DialectInterfaceCollection<TorchBackendConversionInterface> backends(context);
+    DialectInterfaceCollection<TorchBackendConversionInterface> backends(
+        context);
     for (const auto &backend : backends)
       backend.populateTypeConversion(typeConverter, patterns, target);
 

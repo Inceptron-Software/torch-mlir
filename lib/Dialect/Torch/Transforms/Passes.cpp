@@ -73,9 +73,8 @@ void mlir::torch::Torch::createTorchDynamoExportToTorchBackendPipeline(
   // Inline func.call operations created by higher-order ops like while_loop
   // to conform to the linalg-on-tensors backend contract.
   pm.addPass(createInlinerPass());
-  pm.addNestedPass<func::FuncOp>(
-      createReduceOpVariantsPass(options.extraLibrary,
-                                 options.backendLegalOps));
+  pm.addNestedPass<func::FuncOp>(createReduceOpVariantsPass(
+      options.extraLibrary, options.backendLegalOps));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   if (options.decompose) {
     pm.addNestedPass<func::FuncOp>(
@@ -167,9 +166,8 @@ void mlir::torch::Torch::createTorchSimplificationPipeline(
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(createRecomposeComplexOpsPass());
   // Reduce variants of ops to a smaller set of primitives.
-  pm.addNestedPass<func::FuncOp>(
-      createReduceOpVariantsPass(options.extraLibrary,
-                                 options.backendLegalOps));
+  pm.addNestedPass<func::FuncOp>(createReduceOpVariantsPass(
+      options.extraLibrary, options.backendLegalOps));
   pm.addNestedPass<func::FuncOp>(createCanonicalizerPass());
   // Remove dead global slots.
   pm.addPass(createSymbolDCEPass());
