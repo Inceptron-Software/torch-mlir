@@ -22,6 +22,7 @@
 #include "torch-mlir/Conversion/Passes.h"
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
 #include "torch-mlir/Dialect/TorchConversion/Transforms/BackendTypeConversion.h"
+#include "torch-mlir/Dialect/TorchConversion/Transforms/TorchBackendConversionInterface.h"
 
 using namespace mlir;
 using namespace mlir::torch;
@@ -90,6 +91,11 @@ public:
         typeConverter, patterns, target);
     torch_to_linalg::populateTensorConstructorsPatternsAndLegality(
         typeConverter, patterns, target);
+
+    DialectInterfaceCollection<TorchConversion::TorchBackendConversionInterface>
+        backends(context);
+    for (const auto &backend : backends)
+      backend.populateLinalgConversion(typeConverter, patterns, target);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns))))

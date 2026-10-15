@@ -11,12 +11,18 @@ class TypeConverter;
 namespace torch::TorchConversion {
 
 /// Backend dialects can supply custom operator conversions and extend the
-/// linalg-on-tensors contract. Load implementing dialects before running passes,
-/// including dialects that do not yet occur in the source IR.
+/// linalg-on-tensors contract. Load implementing dialects before running
+/// passes, including dialects that do not yet occur in the source IR.
 class TorchBackendConversionInterface
     : public DialectInterface::Base<TorchBackendConversionInterface> {
 public:
   explicit TorchBackendConversionInterface(Dialect *dialect) : Base(dialect) {}
+
+  /// Supply conversions while Torch lists and scalar constants are still
+  /// intact.
+  virtual void populateLinalgConversion(TypeConverter &converter,
+                                        RewritePatternSet &patterns,
+                                        ConversionTarget &target) const = 0;
 
   virtual void populateTypeConversion(TypeConverter &converter,
                                       RewritePatternSet &patterns,
