@@ -91,7 +91,8 @@ class VerifyLinalgOnTensorsBackendContractPass
     target.addDynamicallyLegalDialect<scf::SCFDialect>(opHasLegalTypes);
     target.addDynamicallyLegalDialect<ml_program::MLProgramDialect>(
         opHasLegalTypes);
-    DialectInterfaceCollection<TorchBackendConversionInterface> backends(context);
+    DialectInterfaceCollection<TorchBackendConversionInterface> backends(
+        context);
     for (const auto &backend : backends)
       backend.configureLinalgBackendContract(target, converter);
 

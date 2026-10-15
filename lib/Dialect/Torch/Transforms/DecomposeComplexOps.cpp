@@ -13139,7 +13139,8 @@ public:
       // If the input is not a 1-d tensor, we need to flatten it
       // to a 1D tensor before applying the strided indexing.
       int64_t flattenedInputSize = Torch::kUnknownSize;
-      if (llvm::all_of(inputSizes, [](int64_t s) { return s != Torch::kUnknownSize; })) {
+      if (llvm::all_of(inputSizes,
+                       [](int64_t s) { return s != Torch::kUnknownSize; })) {
         flattenedInputSize = 1;
         for (int64_t size : inputSizes)
           flattenedInputSize *= size;
@@ -13216,7 +13217,8 @@ public:
     }
 
     int64_t flattenedResultSize = Torch::kUnknownSize;
-    if (llvm::all_of(sizesInts, [](int64_t s) { return s != Torch::kUnknownSize; })) {
+    if (llvm::all_of(sizesInts,
+                     [](int64_t s) { return s != Torch::kUnknownSize; })) {
       flattenedResultSize = 1;
       for (int64_t size : sizesInts)
         flattenedResultSize *= size;
